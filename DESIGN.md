@@ -72,6 +72,16 @@ Target markets: **Pakistan, UAE, KSA, Egypt** (extensible to wider MENA).
 - **IBAN**: 29 chars, `EG` prefix
 - **Currency**: EGP
 
+### Bahrain (added per CEO review C7)
+- **RTGS**: EFTS (CBB)
+- **Instant payments**: **BENEFIT Pay / FAWRI+** (BENEFIT Company-operated)
+- **Card scheme**: **BENEFIT** (domestic), Visa, Mastercard
+- **Acquirers**: BENEFIT Company, BANI
+- **IBAN**: 22 chars, `BH` prefix
+- **Currency**: BHD (**3-decimal currency** — Money type must respect this; PKR/AED/SAR/EGP are 2-decimal)
+- **VAT**: 10% since 2022 — appears in settlement payload
+- **Working week**: Sun–Thu (weekend Fri/Sat, like KSA/EG)
+
 ### Regional commonalities
 - Working week: **Sun–Thu** (KSA, Egypt) vs **Mon–Fri** (Pakistan, UAE moved 2022). Settlement windows shift accordingly — model it.
 - **Islamic-finance flags** (`sharia_compliant: true|false`, profit-rate vs interest-rate) — many MENA lenders need both modes. Carry the flag on disbursement.
@@ -529,6 +539,15 @@ A single poller process loops:
 
 **Ordering contract:** Within a partition (e.g., `partition_key='merchant_id:MID_000123'`), events arrive at Trazmo in production order — `pos.transaction.settled` before `pos.batch.settled` for the same merchant. Across partitions there is no ordering. The poller's single-consumer-per-partition pattern (achieved via `ORDER BY partition_key, created_at FOR UPDATE SKIP LOCKED`) holds this guarantee under retries.
 
+**SSRF guard (CEO review S1).** Webhook subscription endpoints validate `target_url`:
+- Reject loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16` — blocks GCP metadata service), private (`10/8`, `172.16/12`, `192.168/16`), unique-local IPv6, and `0.0.0.0`.
+- Reject non-HTTPS in production (HTTP allowed only when `MOCKSIM_ALLOW_HTTP=true`, dev-only).
+- Re-resolve DNS at dispatch time and re-validate (DNS rebinding defense).
+- Reject `target_url` hostnames in a configurable blocklist (e.g., known-internal Trazmo services).
+- Failed subscription with structured error `INVALID_TARGET_URL`; never echoes the rejected URL back in the response body (prevents using the validator as an internal-network scanner).
+
+**Tenant scoping for subscription queries.** `GET /{pos,bank}/webhooks/subscriptions` returns only the caller's `mock_tenant_id`'s subscriptions. No admin-scope cross-tenant list endpoint exists in v1.
+
 ### 6.3 Failure injection
 - Header `X-Inject-Scenario` on inbound calls, OR
 - Per-merchant / per-account scenario config persisted in admin
@@ -548,6 +567,13 @@ A single poller process loops:
 Domain code never `if scenario == "..."` inline. The decorator hands the business function a `scenario_hint` parameter; the function dispatches via a strategy map. Keeps domain code clean.
 
 Each of the ~14 scenarios has a dedicated test (3G) proving it injects exactly what it claims.
+
+**Kill-switch (CEO review D1).** The scenario engine has the highest complexity-to-criticality ratio in MockSim and is the most likely source of post-deploy emergency. Global kill-switch:
+- `POST /admin/scenarios/disable` — flips a global feature flag (stored in Postgres + cached in process); all scenario evaluations short-circuit to "no scenario active," middleware/decorator are no-ops.
+- `POST /admin/scenarios/enable` — reverses.
+- Status visible at `GET /admin/scenarios/status`.
+- Toggling writes an audit-log entry with actor, timestamp, before/after state.
+- Used when scenario-handler bug causes regressions in normal traffic; toggle off, debug separately, toggle back on.
 
 ### 6.4 Clock control
 - `POST /admin/clock/advance` — advance simulated time by duration. **Sliced** (4A, F8): walks forward in 1-sim-day slices (configurable). Each slice runs in its own Postgres transaction. SimScheduler jobs whose `sim_target_time` falls in the slice fire in sim-time order; ties broken by registration order. If wall-clock budget per request exceeds 30s, returns `202 Accepted` with `job_id` and continues async. Advances > 7d sim-time always return `202` immediately.
@@ -791,11 +817,12 @@ API versioning lives in the URL (`/api/v1/...` per Trazmo CLAUDE.md rule 13). A 
 - Failure injection engine
 - Reconciliation endpoint
 
-### Phase 3 — region expansion (2 days)
-- UAE (Aani + UAEDDS), KSA (mada + Sarie+ + VAT), Egypt (Meeza + InstaPay)
-- Working-week awareness
-- VAT/WHT in settlement math
-- One provider fixture per region
+### Phase 3 — region expansion (3 days)
+- UAE (Aani + UAEDDS), KSA (mada + Sarie+ + VAT), Egypt (Meeza + InstaPay), **Bahrain (BENEFIT scheme + BHD + EFTS)**
+- Working-week awareness (BH: Sun–Thu, like KSA/EG)
+- VAT/WHT in settlement math (BH VAT 10% since 2022)
+- One provider fixture per region (BH: a BENEFIT-shaped acquirer fixture)
+- Bahrain added per CEO review (C7): real partner conversation surfaced during this review. Region added to v1, no deferral.
 
 ### Phase 4 — polish (1–2 days)
 - camt.053 XML output
@@ -803,7 +830,7 @@ API versioning lives in the URL (`/api/v1/...` per Trazmo CLAUDE.md rule 13). A 
 - Docker compose with optional ngrok for webhook reachability
 - Contract tests against ISO 20022 XSDs (subset)
 
-Total: **~12–16 working days** for a sim Trazmo can run nightly. (Revised up from prior 8–10 estimate after the Section 1–4 architecture and test-strategy fixes landed. The outside-voice review pegged realistic at 18–25 days; this estimate assumes CC+gstack-accelerated implementation.)
+Total: **~15–20 working days** for a sim Trazmo can run nightly. (Revised up from prior 8–10d → 12–16d → 15–20d as fixes landed and CEO review honest-estimated against optimism. The outside-voice review pegged 18–25d as the human-team realistic range; 15–20d is the honest middle assuming sustained CC+gstack acceleration. If you have to give stakeholders a number, say 18d. Underpromise, overdeliver.)
 
 ### 8.5 Test strategy (3A)
 
@@ -910,6 +937,46 @@ These are anchor numbers, revisable once first integration test hits a wall.
 - Cloud SQL connection limit: pool sized to `min(80, max_connections/2)`. Excess requests get 503 + `Retry-After`.
 - Concurrent-revision migration: advisory lock blocks the second revision until the first finishes. Acceptable for a shared sim.
 
+### 10.1 SLIs, SLOs, Day-1 Dashboard (CEO review O1)
+
+**SLIs** (signals that tell us MockSim is working):
+
+| Signal | Definition |
+|---|---|
+| `webhook_delivery_success_rate` | `delivered_outbox_events / total_outbox_events` over rolling 1h |
+| `webhook_outbox_queue_depth` | `count(*) WHERE delivered_at IS NULL` — gauge |
+| `webhook_dead_letter_rate` | `dead_lettered_events / total_outbox_events` over rolling 1h |
+| `api_p99_latency_per_endpoint_class` | 99th percentile latency, excluding intentional scenario delays |
+| `api_5xx_rate` | non-scenario 5xx / total requests over rolling 5m |
+| `sim_scheduler_lag` | `wall_clock_now() - last_advance_completed_at` — how stale the sim clock is |
+| `accounts_invariant_violations` | count of pool-balance-equals-sum-of-VANs assertion failures (should be 0) |
+
+**SLOs** (commitments to Trazmo CI):
+
+| Target | Window | Rationale |
+|---|---|---|
+| 99.5% availability | rolling 30d | Trazmo CI tolerates ~3.5h/month downtime; not user-facing prod |
+| `webhook_delivery_success_rate` > 99% (excluding intentional scenarios) | rolling 1h | If lower, outbox is broken |
+| `accounts_invariant_violations` = 0 | always | Pool-balance assertion failure = data integrity bug, P0 alert |
+| `api_p99_latency` < 500ms (excluding scenario delays) | rolling 5m | Performance gate from §10 throughput targets |
+
+**Day-1 Cloud Monitoring dashboard** (panels exist on the day Phase 1 ships):
+1. API request rate, p50/p99 latency, 5xx rate — by endpoint class
+2. Webhook outbox queue depth (gauge) + delivery rate (counter)
+3. Dead-letter count + sample event IDs (link to replay)
+4. `accounts_invariant_violations` counter (must be 0; non-zero triggers P0 alert)
+5. SimScheduler lag (sim_time vs wall_clock divergence rate)
+6. Active scenarios (count + breakdown by name) — useful when debugging a tenant's CI run
+7. Per-tenant request rate (top 10) — detect runaway test loops
+8. Postgres connection pool utilization + slow query log
+
+**Alerts (Day-1):**
+- `accounts_invariant_violations > 0` → P0 page
+- `api_5xx_rate > 1%` for 5m → P1 page
+- `webhook_dead_letter_rate > 5%` over 1h → P2 ticket
+- `webhook_outbox_queue_depth > 10000` → P2 ticket
+- `sim_scheduler_lag > 60s` while a clock advance is in-flight → P3 investigate
+
 ---
 
 ## 11. Risks and how we mitigate them
@@ -934,14 +1001,16 @@ These are anchor numbers, revisable once first integration test hits a wall.
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 1 | CLEAR | SELECTIVE_EXPANSION: 7 proposals, 3 accepted (Bahrain, estimate honesty, S1+O1+D1), 0 deferred |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
 | Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 42 issues, 0 critical gaps remaining |
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
 | Design Review | `/plan-design-review` | UI/UX (n/a — backend) | 0 | — | — |
 | DX Review | `/plan-devex-review` | DX (n/a — internal sim) | 0 | — | — |
-| Outside Voice | `/codex` / Claude subagent | Independent challenge | 1 | issues_found_then_resolved | 12 findings, 11 folded into fixes, 1 (scope) prior-decision held |
+| Outside Voice | Claude subagent | Independent challenge (eng review) | 1 | folded | 12 findings, 11 folded into fixes, 1 (scope) prior-decision held |
 
-- **OUTSIDE VOICE:** Claude subagent flagged 12 findings; 11 folded into DESIGN.md (F3 ledger model, F4-F12 spec gaps). F1 (scope) held — user chose full build twice with awareness of F1's argument.
-- **CROSS-MODEL:** Subagent + this review agree on outbox necessity, multi-tenancy schema, money-path test rigor. Subagent extended the review with: ledger overengineering (F3), ordering guarantees (F5), tenant model collision (F6).
+- **OUTSIDE VOICE:** Claude subagent flagged 12 findings during eng review; 11 folded into DESIGN.md (F3 ledger model, F4-F12 spec gaps). F1 (scope) held — user chose full build with awareness.
+- **CROSS-MODEL:** Subagent + eng review agree on outbox necessity, multi-tenancy schema, money-path test rigor. Subagent extended the review with: ledger overengineering, ordering guarantees, tenant model collision.
+- **CEO REVIEW DELTA:** SELECTIVE_EXPANSION mode (effectively): 4 premises pressure-tested (3 held, 1 produced Bahrain expansion). 7 CEO concerns surfaced (C1-C7) + 3 strategic-layer findings (S1 SSRF, O1 SLI/SLO, D1 scenario kill-switch) folded in. Estimate revised 12-16d → 15-20d for honesty.
 - **UNRESOLVED:** 0
-- **VERDICT:** ENG CLEARED — ready to implement Phase 0.
+- **VERDICT:** CEO + ENG CLEARED — ready to implement Phase 0.
 

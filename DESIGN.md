@@ -491,15 +491,21 @@ exercise. If we skip it and let Trazmo couple directly to mock payloads,
 ## 8. Phasing — what to build in what order
 
 ### Phase 0 — skeleton (½ day)
-- FastAPI app, config, SQLite, structlog
+- FastAPI app, config, Postgres (via docker-compose for local dev), structlog
 - SimClock, idempotency middleware, webhook dispatcher stub
-- Admin endpoints: clock, ping
+- Per-tenant data scoping (since the instance is shared)
+- Provider-profile rate-limiting middleware (configurable TPS, latency, 429s)
+- Admin endpoints: clock, ping, tenant reset
 
 ### Phase 1 — Pakistan happy path (2–3 days)
 - POS: merchants, sale generator, T+1 settlement, webhook delivery
 - Bank: pool + merchant accounts, pain.001 → pain.002, camt.054 push on credit
-- One end-to-end test: disburse → simulate a week of GMV → recovery via VAN
+- Mandate create + collect surface (so the EMI leg of the hybrid recovery works)
+- One end-to-end test exercising **both** recovery legs:
+  - Split-payment: % of each settlement routed to recovery via VAN narration
+  - Mandate fallback: monthly DD if cumulative shortfall crosses threshold
 - CSV settlement file drop
+- Sharia flag on accounts + payment instructions; reject-on-mismatch scenario
 - Sample provider fixtures: HBL POS + 1LINK shape
 
 ### Phase 2 — failure & lifecycle (2 days)
@@ -524,14 +530,16 @@ Total: **~8–10 working days** for a sim Trazmo can run nightly.
 
 ---
 
-## 9. Open questions / things to confirm before Phase 1
+## 9. Resolved decisions
 
-1. **Trazmo runtime + language?** Drives whether we ship a typed client SDK alongside the mock.
-2. **Single mock instance shared across devs, or one per dev?** Affects whether we go SQLite-per-instance or Postgres-shared.
-3. **Recovery model:** is Trazmo's recovery cut a fixed % of GMV (split-payment style), or a fixed daily/weekly EMI debited via mandate? The mock can do both but defaults differ.
-4. **Sharia mode:** Are we modelling profit-rate Murabaha/Tawarruq disbursement messages specifically, or is the flag enough?
-5. **KYC/onboarding scope:** out of scope for the mock, or do we need a stub `bank.account.kyc.completed` webhook?
-6. **Production-like rate limits and SLAs?** Some banks throttle to 10 TPS sandbox. Worth mirroring so Trazmo's retry/backoff is exercised.
+| # | Question | Decision | Build implication |
+|---|---|---|---|
+| 1 | Trazmo runtime + language? | **React + FastAPI** | Trazmo backend is Python/FastAPI too — ship a Python client package with shared Pydantic models. TypeScript client codegen'd from OpenAPI for any direct frontend calls to MockSim admin. |
+| 2 | Shared vs per-dev mock instance? | **Shared** | Postgres backend (not SQLite). Tenant-scoped data so multiple devs / CI runs don't trample each other. Explicit `POST /admin/reset?tenant=` per-tenant reset. |
+| 3 | Recovery model? | **Hybrid (split-payment + mandate fallback)** | Mock exposes both surfaces fully. Phase 1 demo exercises both paths in one scenario. Both fixture sets shipped. |
+| 4 | Sharia depth? | **Flag now, message shapes later** | Phase 1: `sharia_compliant` flag on accounts + payment instructions, reject scenario for interest-marked payment to Islamic account. Phase 3+: Murabaha/Tawarruq narration templates and late-payment treatment differences. |
+| 5 | KYC stub? | **Skip for now** | No `kyc.completed` webhook. Accounts start in `active` state. Keep `account_status` field present so it can be added cleanly later. |
+| 6 | Production-like rate limits / SLAs? | **Yes, mirror them** | Per-endpoint TPS limits (configurable per "provider profile"). Realistic latencies (200ms–2s) injected. 429 responses with `Retry-After`. Forces Trazmo's retry/backoff/circuit-breaker code to be exercised from day one. |
 
 ---
 

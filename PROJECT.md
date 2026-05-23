@@ -248,6 +248,15 @@ This is the single command that connects the two systems. See
   `/api/v1/bank/payments/initiate` from trazmo. 4 unit + 4 DB-gated tests.
   Currently sitting on PR [#58](https://github.com/Trazmo/trazmo-platform/pull/58)
   in the trazmo repo.
+- **SME Approve from Flux Onboarding Management** — branches the legacy
+  bike-finance approval flow by `entity_type.code`. For SME borrowers, the
+  flow writes an `onboarding_approval` audit row and stops there (no
+  loan_application is created; that happens later when the SME accepts an
+  offer in the SME portal). For INDIVIDUAL borrowers the original
+  bike-product matcher path is unchanged. Live on PR
+  [#59](https://github.com/Trazmo/trazmo-platform/pull/59) (commit
+  `84ae874`). Toast copy distinguishes the two: "Offers will appear after
+  the next risk-workflow scan" vs "Loan application was created".
 
 ### What's stubbed / partial 🟡
 
@@ -414,6 +423,30 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
+
+- **2026-05-23 (session 6 — SME approve unblocked)** — Approving any
+  MockSim-onboarded SME from Flux 400'd with "No matching active
+  lender_product for this lead's plan." Root cause: `run_portal_onboarding_approve`
+  was a verbatim port of the legacy bike-finance flow and required a
+  unique `lender_product` matchable on `(plan_model_name, tenure, DP,
+  monthly)`. SMEs from MockSim don't have a plan picked at approve time
+  — they get per-channel offers from the risk-workflow scanner later
+  and the loan_application only materialises on SME acceptance. Fix:
+  branch by `entity_type.code` in
+  `modules/onboarding/services/approval_flow.py`. SME borrowers get an
+  `OnboardingApproval` audit row (gate=POST_ONBOARDING, decision=APPROVED,
+  conditions_json marks `next_step: risk_workflow_scan`) and the call
+  returns — no loan_application, no financial_terms, no credit_ops_case.
+  Bike-finance lead path unchanged. Flux toast now shows "Onboarded.
+  Offers will appear after the next risk-workflow scan." for SMEs.
+  Committed as `84ae874` on PR
+  [#59](https://github.com/Trazmo/trazmo-platform/pull/59) and pushed.
+  **Next session pickup:** the SME is now sitting in trazmo with status
+  APPROVED but no offers yet. Either (a) wait for the periodic
+  risk_workflow scanner Celery beat tick, or (b) hit "Run Auto-Scan Now"
+  on the workflow's Flux detail page. That's how offers appear in the
+  SME portal (`:5176`). After that → SME accepts → loan_app → approve →
+  disburse → settlement webhooks → repayment ledger. See Stages F-J above.
 
 - **2026-05-23 (session 5 — Phase I)** — Bulk onboard ULID collision +
   synthetic KYC documents. Two issues hit during the bulk-SME demo:

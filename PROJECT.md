@@ -424,6 +424,87 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
 
+- **2026-05-23 (session 7 — POS loop closed end-to-end)** — Five fixes
+  to make MockSim's POS data actually land as GMV history on the trazmo
+  side. Symptom: after generate-pos in MockSim, Flux still saw zero
+  business metrics for the SME.
+  Five root causes, each independent:
+  (a) MockSim's `/admin/generate-pos` was generate-only — settlement
+  batches were enqueued but never drained for backfilled past dates
+  (the SimScheduler only fires when the sim clock advances). Fix: in
+  backfill mode, after the generation loop, call
+  `settle_merchant_day` inline for each (merchant, date+0..+2) to
+  catch every T+1/T+2 cadence.
+  (b) MockSim's MOCK_POS_1 tenant had no `webhook_subscriptions` row
+  pointing at trazmo. Inserted via SQL — see manual step below; a
+  proper seed script lives in `scripts/seed_e2e.py` and can be the
+  permanent fix.
+  (c) Trazmo's acquirer-webhook route was feature-flagged off via
+  `os.environ.get("ACQUIRER_WEBHOOK_ENABLED")`. `os.environ` doesn't
+  see `.env` (pydantic-settings does). Switched main.py to read from
+  `settings.ACQUIRER_WEBHOOK_ENABLED`.
+  (d) Trazmo's settlement handler was a Phase-2 scaffold that
+  computed deductions but never persisted GMV history. Added an
+  idempotent UPSERT into `merchant_daily_summary` per settlement
+  line, BEFORE the deduction allocation. Risk scorer (which reads
+  this table) now has real data.
+  (e) Flux's Onboarding Management listing showed approved SMEs as
+  unapproved when viewed by an unbound super-admin
+  (`admin@trazmo.com`). The decision-lookup block was gated on
+  `if subs and lid:` which never ran for null `lid`. Refactored to
+  load decisions whenever subs exist, only applying the lender
+  filter when lid is set.
+  Also: bulk-cleaned both DBs (179 trazmo SME entities + descendants;
+  39 MockSim merchants + 224 pos_txns) and bulk-onboarded 30 fresh
+  "Clean SME 001..030" through MockSim — all 30 bridged, each with 5
+  synthetic KYC docs, bound to lender ENT-FLUX-DEFAULT + partner
+  MOCK_POS_1. Added an Acquirer-ID column + name/ACQ search box to
+  MockSim's POS page so operators can line up merchants between Flux
+  and MockSim visually.
+  Trazmo commit: `8941218` on PR
+  [#59](https://github.com/Trazmo/trazmo-platform/pull/59).
+  MockSim commits: `3aa4e9c` (POS page UX) + `784944a` (generate-pos
+  + payload).
+  **Verified end-to-end:** Clean SME 003 → generate-pos 5 days backfill
+  → 4 settlement batches → 4 outbox deliveries (200 OK) → 6 rows in
+  trazmo's `merchant_daily_summary` (gross 4.99L–13.53L PKR per day,
+  txn count 119–307). Visible at
+  http://localhost:5173/business-metrics?tab=daily&entity=387f37b9-93d6-4e0d-9e19-9e84fdbf00e6
+
+  **MORNING PICKUP:**
+  1. Verify the stack is still up:
+     `curl http://localhost:8000/health; curl http://localhost:8080/health`
+     If trazmo is down, restart with the same uvicorn command (cwd
+     trazmo-platform). The `.env` already has `ACQUIRER_WEBHOOK_ENABLED=1`
+     so no inline env var needed anymore.
+  2. The webhook subscription wiring `MOCK_POS_1 → trazmo` was inserted
+     manually via SQL (UUID `26ff4ac0-69b9-4a00-9f6c-863d9683485b`).
+     If MockSim's DB gets reset, re-insert by running:
+     ```sql
+     INSERT INTO webhook_subscriptions (id, mock_tenant_id, trazmo_tenant_id,
+       surface, target_url, target_secret, event_types, status, format,
+       created_at)
+     VALUES (gen_random_uuid(),
+       'b75cda46-19f0-4881-9ae5-999a17314316',
+       '8f65c261-0fe0-4bd5-ac95-3ff46858b9d0',
+       'pos',
+       'http://host.docker.internal:8000/api/v1/acquirer/webhooks/settlement',
+       'dev-signing-secret-change-in-prod-32c',
+       '["pos.batch.settled"]'::jsonb,
+       'active', 'trazmo_settlement', now());
+     ```
+     (Better: fold this into `seed_e2e.py` / `seed_default.py`.)
+  3. Demo loop to drive next: fire generate-pos for the other 29 SMEs
+     from MockSim's POS page (multi-select + Generate POS, 30 days
+     backfill). Then in Flux → Risk Workflows → pick the workflow
+     matching the SMEs' MCC → Run Auto-Scan Now. Eligible SMEs get
+     `loan_offer(CREATED)` rows. Then SME portal :5176 → accept →
+     loan_app → approve in Flux → disburse via mocksim adapter.
+  4. Open issue for tomorrow: the legacy `seed_dev.py` WASL bike-finance
+     leads (`Ali Raza / WASL-2026-0000{1,2,3}`) still show in Flux
+     Onboarding Management. Filter them out or delete them too if
+     they're cluttering the demo.
+
 - **2026-05-23 (session 6 — SME approve unblocked)** — Approving any
   MockSim-onboarded SME from Flux 400'd with "No matching active
   lender_product for this lead's plan." Root cause: `run_portal_onboarding_approve`

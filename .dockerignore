@@ -1,0 +1,35 @@
+# Python artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Dashboard — node_modules rebuilt inside Docker; dist injected from builder stage
+dashboard/node_modules/
+dashboard/dist/
+
+# Git / IDE
+.git/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Postgres data volume
+postgres_data/

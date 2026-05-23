@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: mocksim
+      POSTGRES_PASSWORD: mocksim
+      POSTGRES_DB: mocksim
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mocksim"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mocksim:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mocksim:mocksim@postgres:5432/mocksim
+      PYTHONPATH: /app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src           # hot-reload in dev
+      - ./alembic:/app/alembic   # pick up alembic env.py / migrations without rebuild
+      - ./alembic.ini:/app/alembic.ini
+
+  # Optional: ngrok for local webhook reachability
+  # Uncomment when you need Trazmo (running elsewhere) to receive webhooks from MockSim
+  # ngrok:
+  #   image: ngrok/ngrok:latest
+  #   command: http mocksim:8080 --log stdout
+  #   environment:
+  #     NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+  #   ports:
+  #     - "4040:4040"  # ngrok inspector UI
+  #   depends_on:
+  #     - mocksim
+
+volumes:
+  postgres_data:

@@ -1,0 +1,24 @@
+{
+  "_comment": "Golden fixture: PK merchant 50 expected daily txns, PKR 500 avg ticket. Seeded RNG.",
+  "input": {
+    "mock_tenant_id": "00000000-0000-0000-0000-000000000001",
+    "merchant_id": "MID_TEST0001",
+    "sim_date": "2026-01-05",
+    "merchant": {
+      "region": "PK",
+      "currency": "PKR",
+      "expected_daily_txns": 50,
+      "avg_ticket_minor_units": 50000
+    }
+  },
+  "expected": {
+    "txn_count_min": 25,
+    "txn_count_max": 80,
+    "currency": "PKR",
+    "all_response_codes_00": true,
+    "card_networks_include_PayPak": true,
+    "all_amounts_positive": true,
+    "all_net_settlement_positive": true,
+    "settlement_status": "pending"
+  }
+}

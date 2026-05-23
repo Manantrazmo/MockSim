@@ -1,0 +1,51 @@
+# Secrets — never commit
+.env
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+.venv/
+venv/
+env/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# pytest
+.pytest_cache/
+.cache/
+
+# mypy
+.mypy_cache/
+
+# ruff
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Alembic auto-generated (keep versions/ tracked, not pycache)
+alembic/__pycache__/
+alembic/versions/__pycache__/
+
+# Docker volumes
+postgres_data/
+
+# Dashboard build artifacts (dist/ is rebuilt by Docker)
+dashboard/node_modules/
+dashboard/dist/

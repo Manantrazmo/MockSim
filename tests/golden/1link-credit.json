@@ -1,0 +1,22 @@
+{
+  "_comment": "Golden fixture: PKR PRISM payment initiation, accepted status.",
+  "input": {
+    "mock_tenant_id": "00000000-0000-0000-0000-000000000001",
+    "message_id": "MSG20260105001",
+    "end_to_end_id": "E2E20260105001",
+    "instruction_id": "INSTR20260105001",
+    "amount": { "value": "500000", "currency": "PKR" },
+    "debtor_iban": "PK36SCBL0000001123456702",
+    "creditor_iban": "PK36SCBL0000001123456703",
+    "creditor_name": "Test Merchant Pvt Ltd",
+    "rail": "PRISM"
+  },
+  "expected": {
+    "initial_status": "accepted",
+    "final_status_after_clock_advance": "settled",
+    "fire_at_offset_seconds_min": 0,
+    "fire_at_offset_seconds_max": 86400,
+    "webhook_event_type": "bank.payment.settled",
+    "pacs002_tx_status": "ACSC"
+  }
+}

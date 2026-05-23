@@ -35,6 +35,7 @@ from mocksim.core.identifiers import gen_batch_id, new_ulid
 from mocksim.persistence.database import async_session_factory
 from mocksim.persistence.models import (
     Merchant,
+    MockTenant,
     PosTransaction,
     SettlementBatch,
     WebhookSubscription,
@@ -92,6 +93,15 @@ async def settle_merchant_day(
 
         subs = await _load_subscriptions(session, mock_tenant_id)
 
+        # Tenant-level metadata is only needed for trazmo_settlement deliveries.
+        # Skip the lookup when no such subscription is configured.
+        tenant_row: MockTenant | None = None
+        if any(s.format == "trazmo_settlement" for s in subs):
+            t_result = await session.execute(
+                select(MockTenant).where(MockTenant.id == mock_tenant_id)
+            )
+            tenant_row = t_result.scalar_one_or_none()
+
         # ── Aggregate totals ──────────────────────────────────────
         txn_count = len(txns)
         gross_amount = sum(t.amount for t in txns)
@@ -132,15 +142,53 @@ async def settle_merchant_day(
         )
 
         # ── Enqueue pos.batch.settled webhook ─────────────────────
-        payload = _build_settlement_payload(batch, merchant)
+        native_payload = _build_settlement_payload(batch, merchant)
         for sub in subs:
-            if _should_deliver(sub, "pos.batch.settled"):
+            if not _should_deliver(sub, "pos.batch.settled"):
+                continue
+
+            if sub.format == "trazmo_settlement":
+                # trazmo-platform's batched acquirer-webhook contract.
+                # Requires merchant.acquirer_merchant_id and tenant.partner_code
+                # to be set by the seed orchestrator. Skip-and-warn if missing,
+                # rather than emitting an undeliverable payload.
+                if not (merchant.acquirer_merchant_id and tenant_row and tenant_row.partner_code):
+                    log.warning(
+                        "settlement.trazmo_skip_unmapped",
+                        merchant_id=merchant_id,
+                        has_acquirer_id=bool(merchant.acquirer_merchant_id),
+                        has_partner_code=bool(tenant_row and tenant_row.partner_code),
+                    )
+                    continue
+                trazmo_payload = _build_trazmo_settlement_payload(
+                    partner_code=tenant_row.partner_code,
+                    acquirer_merchant_id=merchant.acquirer_merchant_id,
+                    settlement_date=batch.settlement_date,
+                    gross_amount_minor=batch.gross_amount,
+                    currency_code=batch.currency,
+                )
                 outbox_module.enqueue(
                     session,
                     mock_tenant_id,
-                    merchant_id,            # partition_key
+                    merchant_id,
                     "pos.batch.settled",
-                    payload,
+                    trazmo_payload,
+                    sub.target_url,
+                    sub.target_secret,
+                    format="trazmo_settlement",
+                    extra_headers=(
+                        {"X-Tenant-ID": sub.trazmo_tenant_id}
+                        if sub.trazmo_tenant_id
+                        else None
+                    ),
+                )
+            else:
+                outbox_module.enqueue(
+                    session,
+                    mock_tenant_id,
+                    merchant_id,
+                    "pos.batch.settled",
+                    native_payload,
                     sub.target_url,
                     sub.target_secret,
                 )
@@ -260,6 +308,33 @@ def _unique_batch_id(settlement_date: date) -> str:
     """
     suffix = uuid.uuid4().hex[:6].upper()
     return f"BATCH_{settlement_date.strftime('%Y%m%d')}_{suffix}"
+
+
+def _build_trazmo_settlement_payload(
+    *,
+    partner_code: str,
+    acquirer_merchant_id: str,
+    settlement_date: date,
+    gross_amount_minor: int,
+    currency_code: str,
+) -> dict[str, Any]:
+    """
+    Build the payload trazmo-platform's POST /api/v1/acquirer/webhooks/settlement
+    expects. See AcquirerSettlementPayload in trazmo-platform/modules/prism/
+    webhooks_acquirer.py:63. We emit one settlements[] entry per merchant per day
+    (trazmo's receiver iterates the list, so a single-entry batch is correct).
+    """
+    return {
+        "partner_code": partner_code,
+        "settlements": [
+            {
+                "acquirer_merchant_id": acquirer_merchant_id,
+                "settlement_date_iso": settlement_date.isoformat(),
+                "gross_amount_minor": int(gross_amount_minor),
+                "currency_code": currency_code,
+            }
+        ],
+    }
 
 
 def _build_settlement_payload(

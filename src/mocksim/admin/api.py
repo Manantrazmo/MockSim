@@ -105,6 +105,10 @@ class CreateTenantRequest(BaseModel):
     name: str
     api_key: str = Field(..., min_length=32)
     scopes: list[str] = Field(default_factory=lambda: ["pos.read", "pos.write", "bank.read", "bank.write"])
+    # Optional: the trazmo partner_profile.code this MockSim tenant impersonates.
+    # When set, the trazmo_settlement webhook emitter will use this in the
+    # outbound payload's `partner_code` field.
+    partner_code: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/tenants")
@@ -139,6 +143,7 @@ async def create_tenant(body: CreateTenantRequest, response: Response) -> dict[s
         tenant = MockTenant(
             id=uuid.uuid4(),
             name=body.name,
+            partner_code=body.partner_code,
             created_at=datetime.now(timezone.utc),
         )
         session.add(tenant)

@@ -34,10 +34,16 @@ def enqueue(
     payload: dict[str, Any],
     target_url: str,
     target_secret: str,
+    *,
+    format: str = "per_event",
+    extra_headers: dict[str, str] | None = None,
 ) -> WebhookOutbox:
     """
     Enqueue a webhook event. MUST be called within the same Postgres transaction
     as the business operation that caused this event (outbox pattern).
+
+    `format` and `extra_headers` let a single subscription speak protocols other
+    than MockSim's native one — e.g., 'trazmo_settlement' with X-Tenant-ID.
     """
     event_id = new_ulid()
     now = datetime.now(timezone.utc)
@@ -49,6 +55,8 @@ def enqueue(
         payload=payload,
         target_url=target_url,
         target_secret=target_secret,
+        format=format,
+        extra_headers=extra_headers,
         status="pending",
         attempt_count=0,
         created_at=now,
@@ -112,6 +120,8 @@ async def _deliver(row: WebhookOutbox) -> None:
             event_type=outbox_row.event_type,
             partition_key=outbox_row.partition_key,
             payload=outbox_row.payload,
+            format=outbox_row.format,
+            extra_headers=outbox_row.extra_headers,
         )
 
         now = datetime.now(timezone.utc)

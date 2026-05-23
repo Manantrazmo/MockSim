@@ -34,6 +34,11 @@ class MockTenant(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # partner_code is the identifier trazmo-platform expects in the settlement
+    # webhook payload ({"partner_code": "...", "settlements": [...]}) — it
+    # resolves to a partner_profile/entity row on the trazmo side. One MockSim
+    # tenant maps to one trazmo partner. Null until set by the orchestrator.
+    partner_code: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -97,6 +102,13 @@ class WebhookSubscription(Base, TenantScoped):
     target_url: Mapped[str] = mapped_column(Text, nullable=False)
     target_secret: Mapped[str] = mapped_column(Text, nullable=False)
     event_types: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Envelope shape. 'per_event' (default) is MockSim's native one-event-per-POST
+    # webhook. 'trazmo_settlement' emits batched daily settlements matching
+    # trazmo-platform's POST /api/v1/acquirer/webhooks/settlement contract
+    # (signature header: X-Acquirer-Signature, tenant header: X-Tenant-ID,
+    # body: {partner_code, settlements: [{acquirer_merchant_id, settlement_date_iso,
+    # gross_amount_minor, currency_code}]}).
+    format: Mapped[str] = mapped_column(String(32), nullable=False, default="per_event")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -127,6 +139,13 @@ class WebhookOutbox(Base, TenantScoped):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     target_url: Mapped[str] = mapped_column(Text, nullable=False)
     target_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    # Dispatch protocol. 'per_event' = native MockSim-Signature header.
+    # 'trazmo_settlement' = trazmo-platform's X-Acquirer-Signature (plain hex)
+    # + X-Tenant-ID (from extra_headers). See core/webhook.py post_webhook().
+    format: Mapped[str] = mapped_column(String(32), nullable=False, default="per_event")
+    # Per-row extra headers — used today only for X-Tenant-ID on
+    # trazmo_settlement deliveries. NULL for native per_event events.
+    extra_headers: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending"
     )  # pending|in_flight|delivered|retrying|dead_letter
@@ -320,6 +339,17 @@ class Merchant(Base, TenantScoped):
     id: Mapped[str] = mapped_column(Text, primary_key=True)  # MID_XXXXXX
     mock_tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     trazmo_tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── Trazmo bridge identifiers ────────────────────────────────────
+    # acquirer_merchant_id matches the value trazmo carries in its
+    # acquirer_merchant_mapping table (modules/leadflow/models.py). Unique
+    # per (tenant, partner) so the seed orchestrator can mirror trazmo's
+    # entity → acquirer_merchant_id map verbatim. Null when MockSim is
+    # being used standalone (no trazmo integration).
+    acquirer_merchant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # external_entity_id is trazmo's `entity.id` (UUID, opaque to MockSim).
+    # Stored only for traceability — MockSim never resolves it; trazmo
+    # does the lookup at webhook-receive time via acquirer_merchant_id.
+    external_entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     region: Mapped[str] = mapped_column(String(2), nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     mcc: Mapped[str] = mapped_column(String(4), nullable=False)
@@ -331,7 +361,15 @@ class Merchant(Base, TenantScoped):
     scenario_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    __table_args__ = (Index("ix_merchants_tenant", "mock_tenant_id"),)
+    __table_args__ = (
+        Index("ix_merchants_tenant", "mock_tenant_id"),
+        # Allow the same acquirer_merchant_id across tenants but not within one.
+        UniqueConstraint(
+            "mock_tenant_id", "acquirer_merchant_id",
+            name="uq_merchants_tenant_acquirer_id",
+        ),
+        Index("ix_merchants_acquirer_id", "acquirer_merchant_id"),
+    )
 
 
 class PosTransaction(Base, TenantScoped):

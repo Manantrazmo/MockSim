@@ -65,24 +65,46 @@ async def post_webhook(
     event_type: str,
     partition_key: str,
     payload: dict[str, Any],
+    format: str = "per_event",
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[bool, str | None]:
     """
     POST a signed webhook to target_url.
     Returns (success: bool, error_message: str | None).
 
     Does NOT retry internally — retries are managed by the outbox dispatcher.
+
+    `format` selects the signing/header contract:
+      - 'per_event' (default): Stripe-style MockSim-Signature: t=…,v1=…
+      - 'trazmo_settlement': trazmo-platform's acquirer webhook contract —
+        X-Acquirer-Signature is plain HMAC-SHA256 hex of the raw body (no
+        timestamp prefix), and X-Tenant-ID is read from extra_headers.
+        Matches modules/prism/webhooks_acquirer.py:93 on the trazmo side.
     """
     body = json.dumps(payload, separators=(",", ":"), default=str)
-    ts = int(time.time())
-    sig = _sign(secret, ts, body)
 
-    headers = {
-        "Content-Type": "application/json",
-        "MockSim-Signature": f"t={ts},v1={sig}",
-        "MockSim-Event-Id": event_id,
-        "MockSim-Event-Type": event_type,
-        "MockSim-Partition-Key": partition_key,
-    }
+    if format == "trazmo_settlement":
+        # trazmo verifies: hmac_sha256(secret, raw_body).hexdigest()
+        sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        headers = {
+            "Content-Type": "application/json",
+            "X-Acquirer-Signature": sig,
+            "X-MockSim-Event-Id": event_id,  # informational, not used by trazmo
+        }
+        if extra_headers:
+            headers.update(extra_headers)  # carries X-Tenant-ID
+    else:
+        ts = int(time.time())
+        sig = _sign(secret, ts, body)
+        headers = {
+            "Content-Type": "application/json",
+            "MockSim-Signature": f"t={ts},v1={sig}",
+            "MockSim-Event-Id": event_id,
+            "MockSim-Event-Type": event_type,
+            "MockSim-Partition-Key": partition_key,
+        }
+        if extra_headers:
+            headers.update(extra_headers)
 
     try:
         async with httpx.AsyncClient(timeout=settings.default_webhook_timeout_seconds) as client:

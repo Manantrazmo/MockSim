@@ -89,6 +89,7 @@ class WebhookSubscriptionRequest(BaseModel):
     url: str
     secret: str = Field(..., min_length=16)
     event_types: list[str] = Field(default_factory=list)
+    format: str = Field(default="per_event", pattern="^(per_event|trazmo_settlement)$")
 
 
 class WebhookSubscriptionResponse(BaseModel):
@@ -96,6 +97,7 @@ class WebhookSubscriptionResponse(BaseModel):
     surface: str
     target_url: str
     event_types: list[str]
+    format: str
     status: str
     created_at: datetime
 
@@ -609,6 +611,7 @@ async def create_webhook_subscription(
         target_url=body.url,
         target_secret=body.secret,
         event_types=body.event_types,
+        format=body.format,
         status="active",
         created_at=now,
     )
@@ -620,6 +623,7 @@ async def create_webhook_subscription(
         surface="bank",
         target_url=body.url,
         event_types=body.event_types,
+        format=body.format,
         status="active",
         created_at=now,
     )

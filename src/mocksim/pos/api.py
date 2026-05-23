@@ -36,6 +36,11 @@ class CreateMerchantRequest(BaseModel):
     expected_daily_txns: int = Field(50, ge=1, le=10000)
     avg_ticket_major_units: float = Field(..., gt=0)
     risk_tier: str = Field("standard", pattern="^(low|standard|high)$")
+    # ── Trazmo bridge identifiers (optional) ─────────────────────────
+    # Set these when MockSim is being seeded from a trazmo onboarding flow
+    # so the same merchant is recognized on both sides by acquirer_merchant_id.
+    acquirer_merchant_id: str | None = Field(default=None, max_length=64)
+    external_entity_id: str | None = Field(default=None, max_length=64)
 
 
 class MerchantResponse(BaseModel):
@@ -48,6 +53,8 @@ class MerchantResponse(BaseModel):
     avg_ticket_minor_units: int
     risk_tier: str
     status: str
+    acquirer_merchant_id: str | None = None
+    external_entity_id: str | None = None
     created_at: datetime
 
 
@@ -55,6 +62,9 @@ class WebhookSubscriptionRequest(BaseModel):
     url: str
     secret: str = Field(..., min_length=16)
     event_types: list[str] = Field(default_factory=list)
+    # Envelope: 'per_event' (default) | 'trazmo_settlement' (batched daily,
+    # matches trazmo-platform's /api/v1/acquirer/webhooks/settlement contract).
+    format: str = Field(default="per_event", pattern="^(per_event|trazmo_settlement)$")
 
 
 class WebhookSubscriptionResponse(BaseModel):
@@ -62,6 +72,7 @@ class WebhookSubscriptionResponse(BaseModel):
     surface: str
     target_url: str
     event_types: list[str]
+    format: str
     status: str
     created_at: datetime
 
@@ -92,6 +103,8 @@ async def create_merchant(
         id=mid,
         mock_tenant_id=tenant_id,
         trazmo_tenant_id=getattr(request.state, "trazmo_tenant_id", None),
+        acquirer_merchant_id=body.acquirer_merchant_id,
+        external_entity_id=body.external_entity_id,
         region=body.region.upper(),
         name=body.name,
         mcc=body.mcc,
@@ -118,6 +131,8 @@ async def create_merchant(
         avg_ticket_minor_units=avg_minor,
         risk_tier=body.risk_tier,
         status="active",
+        acquirer_merchant_id=body.acquirer_merchant_id,
+        external_entity_id=body.external_entity_id,
         created_at=now,
     )
     await complete(session, tenant_id, idempotency_key, 201, resp.model_dump(mode="json"))
@@ -141,7 +156,10 @@ async def list_merchants(
             id=m.id, name=m.name, region=m.region, mcc=m.mcc,
             currency=m.currency, expected_daily_txns=m.expected_daily_txns,
             avg_ticket_minor_units=m.avg_ticket_minor_units,
-            risk_tier=m.risk_tier, status=m.status, created_at=m.created_at,
+            risk_tier=m.risk_tier, status=m.status,
+            acquirer_merchant_id=m.acquirer_merchant_id,
+            external_entity_id=m.external_entity_id,
+            created_at=m.created_at,
         )
         for m in merchants
     ]
@@ -166,6 +184,8 @@ async def get_merchant(
         avg_ticket_minor_units=merchant.avg_ticket_minor_units,
         risk_tier=merchant.risk_tier,
         status=merchant.status,
+        acquirer_merchant_id=merchant.acquirer_merchant_id,
+        external_entity_id=merchant.external_entity_id,
         created_at=merchant.created_at,
     )
 
@@ -374,6 +394,7 @@ async def create_webhook_subscription(
         target_url=body.url,
         target_secret=body.secret,
         event_types=body.event_types,
+        format=body.format,
         status="active",
         created_at=now,
     )
@@ -385,6 +406,7 @@ async def create_webhook_subscription(
         surface="pos",
         target_url=body.url,
         event_types=body.event_types,
+        format=body.format,
         status="active",
         created_at=now,
     )

@@ -32,6 +32,7 @@ services:
       - ./alembic:/app/alembic   # pick up alembic env.py / migrations without rebuild
       - ./alembic.ini:/app/alembic.ini
       - ./scripts:/app/scripts   # operational scripts (seed_default.py, etc.)
+      - ./tests:/app/tests       # test sources, pickup without rebuild
 
   # Optional: ngrok for local webhook reachability
   # Uncomment when you need Trazmo (running elsewhere) to receive webhooks from MockSim

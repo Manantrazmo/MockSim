@@ -178,15 +178,47 @@ def create_app() -> FastAPI:
 
     # ── Control-panel UI ──────────────────────────────────────────────
     # Serve the pre-built React SPA from dashboard/dist/ at /ui.
-    # html=True enables SPA fallback: unknown paths return index.html.
-    # Silently skipped when the dist/ directory hasn't been built yet
-    # (e.g., local Python-only dev without running `npm run build`).
+    #
+    # StaticFiles' `html=True` is misleading: it only serves index.html
+    # when the requested path resolves to a *directory*, NOT for unknown
+    # files. So refreshing the browser at /ui/onboarding returned 404
+    # because there's no `onboarding` file in dist/. The SPAStaticFiles
+    # subclass below catches that 404 and falls back to index.html so
+    # React Router gets a chance to handle the URL — exactly what
+    # production SPA hosts (Vercel, Netlify, etc.) do by default.
+    #
+    # We DON'T fall back for paths that look like real assets (anything
+    # under assets/ or with a file extension in the final segment) —
+    # those 404s indicate real bugs and shouldn't be masked with HTML.
     _dashboard_dist = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "../../dashboard/dist")
     )
     if os.path.isdir(_dashboard_dist):
         from fastapi.staticfiles import StaticFiles
-        app.mount("/ui", StaticFiles(directory=_dashboard_dist, html=True), name="ui")
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        class SPAStaticFiles(StaticFiles):
+            async def get_response(self, path: str, scope):  # type: ignore[override]
+                try:
+                    return await super().get_response(path, scope)
+                except StarletteHTTPException as exc:
+                    if exc.status_code != 404:
+                        raise
+                    # Real assets should keep 404'ing — a missing JS bundle
+                    # masked as index.html would cause confusing parse errors
+                    # in the browser. Heuristic: any path under /assets/ or
+                    # whose final segment contains a dot is an asset.
+                    final = path.rsplit("/", 1)[-1]
+                    if path.startswith("assets/") or "." in final:
+                        raise
+                    # SPA route → serve the shell so React Router can route.
+                    return await super().get_response("index.html", scope)
+
+        app.mount(
+            "/ui",
+            SPAStaticFiles(directory=_dashboard_dist, html=True),
+            name="ui",
+        )
         log.info("mocksim.dashboard.mounted", path=_dashboard_dist)
 
     # Global exception handler — converts MockSimError to error envelope

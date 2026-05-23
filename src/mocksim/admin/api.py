@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, text
 
@@ -107,11 +107,35 @@ class CreateTenantRequest(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: ["pos.read", "pos.write", "bank.read", "bank.write"])
 
 
-@router.post("/tenants", status_code=201)
-async def create_tenant(body: CreateTenantRequest) -> dict[str, Any]:
-    """Create a new mock tenant with an initial API key."""
+@router.post("/tenants")
+async def create_tenant(body: CreateTenantRequest, response: Response) -> dict[str, Any]:
+    """
+    Create a new mock tenant with an initial API key.
+
+    Idempotent: if the supplied api_key hash already exists, returns the
+    existing tenant with HTTP 200 instead of 201. This lets bootstrap
+    scripts re-run without --reset.
+    """
     import hashlib
+
+    key_hash = hashlib.sha256(body.api_key.encode()).hexdigest()
+
     async with async_session_factory() as session:
+        # Idempotent path: same api_key already issued → return existing tenant.
+        existing = await session.execute(
+            select(ApiKey.mock_tenant_id).where(ApiKey.key_hash == key_hash)
+        )
+        existing_tenant_id = existing.scalar_one_or_none()
+        if existing_tenant_id is not None:
+            response.status_code = 200
+            log.info("admin.tenant.exists", tenant_id=str(existing_tenant_id), name=body.name)
+            return {
+                "tenant_id": str(existing_tenant_id),
+                "name": body.name,
+                "api_key_hint": body.api_key[:8] + "...",
+                "existed": True,
+            }
+
         tenant = MockTenant(
             id=uuid.uuid4(),
             name=body.name,
@@ -120,7 +144,6 @@ async def create_tenant(body: CreateTenantRequest) -> dict[str, Any]:
         session.add(tenant)
         await session.flush()
 
-        key_hash = hashlib.sha256(body.api_key.encode()).hexdigest()
         api_key = ApiKey(
             key_hash=key_hash,
             mock_tenant_id=tenant.id,
@@ -132,39 +155,54 @@ async def create_tenant(body: CreateTenantRequest) -> dict[str, Any]:
         session.add(api_key)
         await session.commit()
 
+    response.status_code = 201
     log.info("admin.tenant.created", tenant_id=str(tenant.id), name=body.name)
     return {
         "tenant_id": str(tenant.id),
         "name": body.name,
         "api_key_hint": body.api_key[:8] + "...",
+        "existed": False,
     }
 
 
 @router.post("/reset")
-async def reset_tenant(tenant_id: str) -> dict[str, Any]:
+async def reset_tenant(tenant_id: str, purge: bool = False) -> dict[str, Any]:
     """
-    Wipe all data for a mock_tenant_id. Affects only that tenant's rows.
-    Used by CI to get a clean slate between test runs.
+    Wipe all data for a mock_tenant_id.
+
+    Default (purge=false) deletes only domain data (merchants, accounts,
+    transactions, payments, mandates, webhooks, idempotency, scenarios).
+    The tenant row and its api_keys are preserved so existing dashboards
+    keep working.
+
+    purge=true additionally deletes the MockTenant row + ApiKey rows,
+    so the same api_key can be reissued from scratch by /admin/tenants.
     """
     tid = uuid.UUID(tenant_id)
     async with async_session_factory() as session:
         from mocksim.persistence.models import (
-            Account, AccountEntry, IdempotencyRecord, Mandate,
-            Merchant, PaymentInstruction, PosTransaction, ScenarioConfig,
-            SettlementBatch, WebhookOutbox, WebhookSubscription,
+            Account, AccountEntry, ApiKey, IdempotencyRecord, Mandate,
+            Merchant, MockTenant, PaymentInstruction, PosTransaction,
+            ScenarioConfig, SettlementBatch, WebhookOutbox, WebhookSubscription,
         )
-        for model in [
+        # Domain data — order matters for FK constraints (children first).
+        domain_models = [
             AccountEntry, Account, PaymentInstruction, Mandate,
             PosTransaction, SettlementBatch, WebhookOutbox,
             WebhookSubscription, IdempotencyRecord, ScenarioConfig,
-        ]:
+            Merchant,
+        ]
+        for model in domain_models:
             await session.execute(
                 delete(model).where(model.mock_tenant_id == tid)  # type: ignore[attr-defined]
             )
+        if purge:
+            await session.execute(delete(ApiKey).where(ApiKey.mock_tenant_id == tid))
+            await session.execute(delete(MockTenant).where(MockTenant.id == tid))
         await session.commit()
 
-    log.info("admin.tenant.reset", tenant_id=tenant_id)
-    return {"status": "reset", "tenant_id": tenant_id}
+    log.info("admin.tenant.reset", tenant_id=tenant_id, purge=purge)
+    return {"status": "purged" if purge else "reset", "tenant_id": tenant_id}
 
 
 # ── Scenario engine ───────────────────────────────────────────────

@@ -49,3 +49,4 @@ postgres_data/
 # Dashboard build artifacts (dist/ is rebuilt by Docker)
 dashboard/node_modules/
 dashboard/dist/
+.claude/

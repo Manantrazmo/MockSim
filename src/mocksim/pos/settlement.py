@@ -165,6 +165,8 @@ async def settle_merchant_day(
                     acquirer_merchant_id=merchant.acquirer_merchant_id,
                     settlement_date=batch.settlement_date,
                     gross_amount_minor=batch.gross_amount,
+                    net_amount_minor=batch.net_amount,
+                    transaction_count=batch.txn_count,
                     currency_code=batch.currency,
                 )
                 outbox_module.enqueue(
@@ -317,23 +319,33 @@ def _build_trazmo_settlement_payload(
     settlement_date: date,
     gross_amount_minor: int,
     currency_code: str,
+    net_amount_minor: int | None = None,
+    transaction_count: int | None = None,
 ) -> dict[str, Any]:
     """
     Build the payload trazmo-platform's POST /api/v1/acquirer/webhooks/settlement
     expects. See AcquirerSettlementPayload in trazmo-platform/modules/prism/
     webhooks_acquirer.py:63. We emit one settlements[] entry per merchant per day
     (trazmo's receiver iterates the list, so a single-entry batch is correct).
+
+    `net_amount_minor` and `transaction_count` were added so trazmo can roll
+    each settlement straight into `merchant_daily_summary` (the table the risk
+    scorer reads) without a second round-trip. They're optional on the wire so
+    older receivers ignore them harmlessly.
     """
+    line: dict[str, Any] = {
+        "acquirer_merchant_id": acquirer_merchant_id,
+        "settlement_date_iso": settlement_date.isoformat(),
+        "gross_amount_minor": int(gross_amount_minor),
+        "currency_code": currency_code,
+    }
+    if net_amount_minor is not None:
+        line["net_amount_minor"] = int(net_amount_minor)
+    if transaction_count is not None:
+        line["transaction_count"] = int(transaction_count)
     return {
         "partner_code": partner_code,
-        "settlements": [
-            {
-                "acquirer_merchant_id": acquirer_merchant_id,
-                "settlement_date_iso": settlement_date.isoformat(),
-                "gross_amount_minor": int(gross_amount_minor),
-                "currency_code": currency_code,
-            }
-        ],
+        "settlements": [line],
     }
 
 

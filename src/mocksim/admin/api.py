@@ -666,10 +666,22 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
 
     For each (merchant, date) we call pos.generator.generate_merchant_day
     directly. Returns counts of transactions produced per merchant.
+
+    Settlements: generate_merchant_day enqueues a `pos.settle_batch` job
+    for the merchant's expected_settlement_date (typically T+1 / T+2),
+    which the SimScheduler runs when the sim-clock crosses that date.
+    For BACKFILLED runs (the common demo case) every expected settlement
+    date is already in the past, so we drain them inline by calling
+    settle_merchant_day for each (merchant, date+1, date+2) — the +1 / +2
+    window catches the T+1 / T+2 settlement cadences without us hard-
+    coding the per-region scheme. Without this drain pass the POS data
+    sits in MockSim and never propagates as settlement webhooks to
+    trazmo, so the Flux dashboard never reflects the new GMV.
     """
     from datetime import date as _date, timedelta
     from mocksim.clock import clock as _clock
     from mocksim.pos.generator import generate_merchant_day
+    from mocksim.pos.settlement import settle_merchant_day
 
     today = _clock.now().date()
     if body.backfill:
@@ -691,6 +703,7 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
         return {"results": {}, "total_txns": 0, "warning": "no matching merchants found"}
 
     total = 0
+    settlement_batches = 0
     for m in merchants:
         per_day: list[int] = []
         for d in dates:
@@ -706,6 +719,32 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
                 log.warning("admin.generate_pos.failed",
                             merchant_id=m.id, date=d.isoformat(), error=str(exc))
                 per_day.append(0)
+
+        # Drain pending settlement batches for this merchant. The window
+        # covers T+0 .. T+2 past the last generated date to catch every
+        # expected_settlement_date the generator assigned. settle_merchant_day
+        # returns None when there's nothing pending for the (merchant, date)
+        # pair, so unrelated dates are cheap no-ops.
+        if body.backfill and per_day and sum(per_day) > 0:
+            for d in dates:
+                for offset in (0, 1, 2):
+                    settle_for = d + timedelta(days=offset)
+                    if settle_for > today + timedelta(days=2):
+                        continue
+                    try:
+                        batch = await settle_merchant_day(
+                            mock_tenant_id=m.mock_tenant_id,
+                            merchant_id=m.id,
+                            settlement_date=settle_for,
+                        )
+                        if batch is not None:
+                            settlement_batches += 1
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("admin.generate_pos.settle_failed",
+                                    merchant_id=m.id,
+                                    settlement_date=settle_for.isoformat(),
+                                    error=str(exc))
+
         results[m.id] = {
             "name": m.name,
             "acquirer_merchant_id": m.acquirer_merchant_id,
@@ -716,6 +755,7 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
     return {
         "results": results,
         "total_txns": total,
+        "settlement_batches": settlement_batches,
         "dates": [d.isoformat() for d in dates],
     }
 

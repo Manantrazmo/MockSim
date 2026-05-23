@@ -415,6 +415,26 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
 
+- **2026-05-23 (session 4 — Phase H)** — Service auth for cross-system
+  writes. Previously MockSim wrote directly to trazmo's postgres via
+  asyncpg INSERTs — anyone with network access to :5433 could do
+  anything, no audit, no validation. Replaced with an authenticated HTTP
+  surface on trazmo: `/api/v1/_internal/mocksim/{bootstrap,lenders,smes,
+  onboard-merchant}`, gated on `Authorization: Bearer
+  <MOCKSIM_SERVICE_TOKEN>` with constant-time comparison. The router is
+  *opt-in* — empty config returns 401 for every request, so a
+  misconfigured deployment can't accidentally expose it. Trazmo's
+  `create_merchant_profile` and `upsert_acquirer_mapping` service
+  functions are called so audit events fire as if a human did it.
+  MockSim's `mocksim.trazmo.client` rewritten to use httpx instead of
+  asyncpg — same public dataclasses + function names, callers
+  unchanged. Two new env vars: `MOCKSIM_SERVICE_TOKEN` on the trazmo
+  side, `TRAZMO_API_URL` + `TRAZMO_SERVICE_TOKEN` on MockSim. End-to-end
+  verified: 401 on no/wrong token, 200 on correct token, `ACQ-00027`
+  created via the authenticated path in both systems. 112/112 tests
+  pass. PR for trazmo side: claude/mocksim-service-api (stacks on
+  PR #58).
+
 - **2026-05-23 (session 3 — Phase G)** — Proper session auth. Replaced
   the "paste admin token + tenant API key into localStorage" UX with a
   username + password login that returns an HTTP-only signed cookie

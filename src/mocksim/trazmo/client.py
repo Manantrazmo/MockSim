@@ -1,44 +1,44 @@
 """
-mocksim.trazmo.client — async helpers that read & write trazmo-platform's
-postgres directly, used by the cross-system onboarding flow.
+mocksim.trazmo.client — HTTP client for trazmo-platform's
+/api/v1/_internal/mocksim/* service surface.
 
-Public surface (every function takes its own asyncpg connection so the
-caller can run them inside a single transaction):
+This module USED to write directly to trazmo's postgres via asyncpg.
+That was wrong: anyone with network access to trazmo's :5433 could do
+anything, with no audit, no validation, no access control. Phase H
+replaces those raw INSERTs with calls to a service-token-protected
+HTTP API on the trazmo side (see modules/_internal/mocksim_router.py
+in trazmo-platform).
 
-  • resolve_bootstrap(conn, partner_code)   → BootstrapHandles
-        Fast lookup of (tenant_id, partner_entity_id, pool_id,
-        currency_id, entity_type_sme_id). Errors if the partner isn't
-        set up — caller should run trazmo's seed_dev + seed_mock_gmv
-        first (or the MockSim seed_e2e --run-trazmo-seeds path).
+Two env vars drive everything:
+  TRAZMO_API_URL        e.g. http://host.docker.internal:8000
+  TRAZMO_SERVICE_TOKEN  shared secret with trazmo's MOCKSIM_SERVICE_TOKEN
 
-  • list_lenders(conn)                       → list[LenderRow]
-        For MockSim UI lender dropdown.
+Public surface (unchanged from the asyncpg version — caller doesn't
+care that the implementation changed):
 
-  • list_sme_entities(conn, partner_code)    → list[SmeRow]
-        For MockSim UI "existing SMEs" panel — shows the union of what
-        was created on either side, by walking the acquirer_mapping table.
+  resolve_bootstrap(partner_code)      → BootstrapHandles
+  list_lenders()                        → list[LenderRow]
+  list_sme_entities(partner_code)       → list[SmeRow]
+  onboard_sme(...)                      → OnboardedSme
 
-  • onboard_sme(conn, **kw)                  → OnboardedSme
-        Idempotent insertion of entity + sme_profile + merchant_profile +
-        acquirer_mapping. Returns the IDs the caller needs to mirror
-        the row into MockSim.
-
-Row shapes mirror trazmo-platform/scripts/seed_mock_gmv.py (the only
-sanctioned source of truth for this layout). When trazmo updates that
-seed, this module needs the same update.
+Errors:
+  TrazmoNotBootstrapped — partner / pool / currency missing on the
+                          trazmo side; caller should run trazmo's seeds.
+  TrazmoServiceError    — any other non-2xx from the trazmo API,
+                          carries the HTTP status and body for diagnosis.
 """
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
 
-import asyncpg
+import httpx
 import structlog
 
 log = structlog.get_logger(__name__)
 
 
-# ── Lookup result types ──────────────────────────────────────────────────────
+# ── Lookup result types (unchanged shape — callers don't recompile) ─────────
 
 
 @dataclass(frozen=True)
@@ -78,268 +78,177 @@ class OnboardedSme:
     acquirer_mapping_id: uuid.UUID
 
 
-# ── Errors ───────────────────────────────────────────────────────────────────
+# ── Errors ──────────────────────────────────────────────────────────────────
 
 
 class TrazmoNotBootstrapped(Exception):
-    """Raised when the trazmo side hasn't been seeded for this partner_code."""
+    """Trazmo side isn't seeded for the requested partner."""
 
 
-# ── Resolvers ────────────────────────────────────────────────────────────────
+class TrazmoServiceError(Exception):
+    """Non-2xx from trazmo's service API. Carries status + body."""
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"trazmo /_internal/mocksim returned HTTP {status}: {body[:200]}")
+        self.status = status
+        self.body = body
+
+
+class TrazmoNotConfigured(Exception):
+    """TRAZMO_API_URL or TRAZMO_SERVICE_TOKEN missing on MockSim side."""
+
+
+# ── HTTP client wrapper ─────────────────────────────────────────────────────
+
+
+@dataclass
+class TrazmoClient:
+    """
+    Tiny stateless wrapper. Each call opens a short-lived httpx.AsyncClient;
+    the call rate from the onboarding UI is low so connection pooling
+    isn't worth the lifecycle complexity. If usage grows we'll switch to
+    a long-lived pool stored on app state.
+    """
+    base_url: str
+    service_token: str
+    timeout_s: float = 10.0
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.service_token}",
+            "Content-Type": "application/json",
+        }
+
+    async def _get(self, path: str, params: dict | None = None) -> dict | list:
+        async with httpx.AsyncClient(timeout=self.timeout_s) as c:
+            r = await c.get(f"{self.base_url}{path}", params=params, headers=self._headers())
+        if r.status_code == 404:
+            raise TrazmoNotBootstrapped(r.json().get("detail", "not found"))
+        if not r.is_success:
+            raise TrazmoServiceError(r.status_code, r.text)
+        return r.json()
+
+    async def _post(self, path: str, body: dict) -> dict:
+        async with httpx.AsyncClient(timeout=self.timeout_s) as c:
+            r = await c.post(f"{self.base_url}{path}", json=body, headers=self._headers())
+        if r.status_code == 404:
+            raise TrazmoNotBootstrapped(r.json().get("detail", "not found"))
+        if not r.is_success:
+            raise TrazmoServiceError(r.status_code, r.text)
+        return r.json()
+
+
+# ── Module-level convenience that reads from settings ────────────────────────
+
+
+def _client_from_settings() -> TrazmoClient:
+    from mocksim.config import settings
+    if not settings.trazmo_api_url or not settings.trazmo_service_token:
+        raise TrazmoNotConfigured(
+            "Set TRAZMO_API_URL and TRAZMO_SERVICE_TOKEN in MockSim's env so "
+            "the cross-system onboarding endpoint can call trazmo. The token "
+            "must match trazmo's MOCKSIM_SERVICE_TOKEN."
+        )
+    return TrazmoClient(
+        base_url=settings.trazmo_api_url.rstrip("/"),
+        service_token=settings.trazmo_service_token,
+    )
+
+
+# ── Public functions (kept signature-compatible with the asyncpg version) ──
 
 
 async def resolve_bootstrap(
-    conn: asyncpg.Connection,
     *,
     partner_code: str,
     country_code: str = "PK",
     timezone: str = "Asia/Karachi",
 ) -> BootstrapHandles:
-    """Resolve every ID our writes need, in one round trip per row."""
-    partner_row = await conn.fetchrow(
-        """
-        SELECT pp.entity_id        AS partner_entity_id,
-               pp.tenant_id        AS tenant_id,
-               pp.country_code     AS country_code
-          FROM partner_profile pp
-         WHERE pp.code = $1
-         LIMIT 1
-        """,
-        partner_code,
-    )
-    if partner_row is None:
-        raise TrazmoNotBootstrapped(
-            f"partner_profile with code={partner_code!r} not found in trazmo. "
-            "Run `docker compose exec mocksim python scripts/seed_e2e.py "
-            "--run-trazmo-seeds --partner-code <code>` first."
-        )
-
-    pool_row = await conn.fetchrow(
-        "SELECT id FROM merchant_pool "
-        "WHERE tenant_id = $1 AND partner_entity_id = $2 LIMIT 1",
-        partner_row["tenant_id"], partner_row["partner_entity_id"],
-    )
-    if pool_row is None:
-        raise TrazmoNotBootstrapped(
-            f"merchant_pool for partner {partner_code} not found — re-run "
-            "trazmo's seed_mock_gmv to (re)create it."
-        )
-
-    # PKR by default — the demo currency. Other currencies live alongside.
-    currency_row = await conn.fetchrow(
-        "SELECT id FROM currency WHERE code = $1",
-        "PKR",
-    )
-    if currency_row is None:
-        raise TrazmoNotBootstrapped(
-            "currency row for PKR not found — run trazmo's seed_dev first."
-        )
-
-    sme_type_row = await conn.fetchrow(
-        "SELECT id FROM entity_type WHERE code = 'SME'",
-    )
-    if sme_type_row is None:
-        raise TrazmoNotBootstrapped("entity_type SME missing — run seed_dev")
-
+    client = _client_from_settings()
+    data = await client._get("/api/v1/_internal/mocksim/bootstrap",
+                             params={"partner_code": partner_code})
     return BootstrapHandles(
-        tenant_id=partner_row["tenant_id"],
-        partner_entity_id=partner_row["partner_entity_id"],
-        pool_id=pool_row["id"],
-        currency_id=currency_row["id"],
-        entity_type_sme_id=sme_type_row["id"],
-        country_code=partner_row["country_code"] or country_code,
+        tenant_id=uuid.UUID(data["tenant_id"]),
+        partner_entity_id=uuid.UUID(data["partner_entity_id"]),
+        pool_id=uuid.UUID(data["pool_id"]),
+        currency_id=uuid.UUID(data["currency_id"]),
+        entity_type_sme_id=uuid.UUID(data["entity_type_sme_id"]),
+        country_code=data.get("country_code", country_code),
         timezone=timezone,
     )
 
 
-async def list_lenders(conn: asyncpg.Connection) -> list[LenderRow]:
-    rows = await conn.fetch(
-        """
-        SELECT e.id, e.code, e.legal_name
-          FROM entity e
-          JOIN entity_type t ON t.id = e.entity_type_id
-         WHERE t.code = 'LENDER'
-           AND e.status = 'ACTIVE'
-         ORDER BY e.created_at
-        """
-    )
-    return [LenderRow(entity_id=r["id"], code=r["code"], legal_name=r["legal_name"]) for r in rows]
+async def list_lenders() -> list[LenderRow]:
+    client = _client_from_settings()
+    rows = await client._get("/api/v1/_internal/mocksim/lenders")
+    assert isinstance(rows, list)
+    return [
+        LenderRow(entity_id=uuid.UUID(r["id"]), code=r["code"], legal_name=r["legal_name"])
+        for r in rows
+    ]
 
 
-async def list_sme_entities(
-    conn: asyncpg.Connection,
-    *,
-    partner_code: str,
-) -> list[SmeRow]:
-    rows = await conn.fetch(
-        """
-        SELECT e.id          AS entity_id,
-               e.code        AS code,
-               e.legal_name  AS legal_name,
-               amm.acquirer_merchant_id,
-               mp.mcc,
-               e.status
-          FROM entity e
-          JOIN entity_type et            ON et.id = e.entity_type_id
-     LEFT JOIN acquirer_merchant_mapping amm
-                ON amm.trazmo_entity_id = e.id
-     LEFT JOIN merchant_profile mp
-                ON mp.entity_id = e.id
-     LEFT JOIN partner_profile pp
-                ON pp.entity_id = amm.partner_entity_id
-         WHERE et.code = 'SME'
-           AND (pp.code = $1 OR pp.code IS NULL)
-         ORDER BY e.created_at DESC
-         LIMIT 500
-        """,
-        partner_code,
-    )
+async def list_sme_entities(*, partner_code: str) -> list[SmeRow]:
+    client = _client_from_settings()
+    rows = await client._get("/api/v1/_internal/mocksim/smes",
+                             params={"partner_code": partner_code})
+    assert isinstance(rows, list)
     return [
         SmeRow(
-            entity_id=r["entity_id"],
+            entity_id=uuid.UUID(r["entity_id"]),
             code=r["code"],
             legal_name=r["legal_name"],
-            acquirer_merchant_id=r["acquirer_merchant_id"],
-            mcc=r["mcc"],
+            acquirer_merchant_id=r.get("acquirer_merchant_id"),
+            mcc=r.get("mcc"),
             status=r["status"],
         )
         for r in rows
     ]
 
 
-# ── Writes (idempotent — re-runnable) ────────────────────────────────────────
-
-
 async def onboard_sme(
-    conn: asyncpg.Connection,
     *,
-    handles: BootstrapHandles,
+    partner_code: str,
     sme_code: str,
     legal_name: str,
     owner_name: str,
     mcc: str,
-    acquirer_merchant_id: str,
+    country_code: str = "PK",
+    timezone: str = "Asia/Karachi",
+    acquirer_merchant_id: str | None = None,
     terminal_ids: list[str] | None = None,
 ) -> OnboardedSme:
     """
-    Idempotent insertion. Re-running with the same `sme_code` returns
-    the existing IDs without duplicating rows.
-
-    Mirrors scripts/seed_mock_gmv.py:_ensure_merchant_entity (lines 530–599)
-    plus the merchant_profile + acquirer_mapping API calls (lines 670–717).
+    Single-call cross-system onboarding. Trazmo creates entity +
+    sme_profile + merchant_profile + acquirer_mapping atomically and
+    emits the relevant audit event. We just unbox the IDs.
     """
-    # 1. entity (idempotent on code)
-    entity_id = await conn.fetchval(
-        "SELECT id FROM entity WHERE code = $1", sme_code,
-    )
-    if entity_id is None:
-        entity_id = uuid.uuid4()
-        await conn.execute(
-            """
-            INSERT INTO entity
-              (id, tenant_id, entity_type_id, code, legal_name, display_name,
-               metadata, status, created_at, updated_at, version)
-            VALUES ($1, $2, $3, $4, $5, $5, '{}'::jsonb, 'ACTIVE',
-                    now(), now(), 0)
-            """,
-            entity_id, handles.tenant_id, handles.entity_type_sme_id,
-            sme_code, legal_name,
-        )
-
-    # 2. sme_profile (idempotent on entity_id)
-    sme_profile_id = await conn.fetchval(
-        "SELECT id FROM sme_profile WHERE entity_id = $1", entity_id,
-    )
-    if sme_profile_id is None:
-        sme_profile_id = uuid.uuid4()
-        await conn.execute(
-            """
-            INSERT INTO sme_profile
-              (id, entity_id, owner_name, turnover, employees, status,
-               created_at, updated_at, version)
-            VALUES ($1, $2, $3, 1000000.00, 5, 'ACTIVE',
-                    now(), now(), 0)
-            """,
-            sme_profile_id, entity_id, owner_name,
-        )
-
-    # 3. merchant_profile (idempotent on (tenant_id, entity_id))
-    merchant_profile_id = await conn.fetchval(
-        "SELECT id FROM merchant_profile WHERE tenant_id = $1 AND entity_id = $2",
-        handles.tenant_id, entity_id,
-    )
-    if merchant_profile_id is None:
-        merchant_profile_id = uuid.uuid4()
-        # NB: merchant_profile has no `status` column (it tracks merchant-
-        # advance eligibility via the allocation_strategy + pool linkage,
-        # not a status flag). Keep this in sync with trazmo migrations.
-        await conn.execute(
-            """
-            INSERT INTO merchant_profile
-              (id, tenant_id, entity_id, sme_profile_id, pool_id,
-               primary_gmv_source, mcc, country_code,
-               operating_currency_id, operating_timezone,
-               created_at, updated_at, version)
-            VALUES ($1, $2, $3, $4, $5,
-                    'MOCK', $6, $7,
-                    $8, $9,
-                    now(), now(), 0)
-            """,
-            merchant_profile_id, handles.tenant_id, entity_id, sme_profile_id,
-            handles.pool_id, mcc, handles.country_code,
-            handles.currency_id, handles.timezone,
-        )
-
-    # 4. acquirer_merchant_mapping (idempotent on
-    #    (tenant_id, partner_entity_id, acquirer_merchant_id))
-    mapping_id = await conn.fetchval(
-        """
-        SELECT id FROM acquirer_merchant_mapping
-         WHERE tenant_id = $1
-           AND partner_entity_id = $2
-           AND acquirer_merchant_id = $3
-        """,
-        handles.tenant_id, handles.partner_entity_id, acquirer_merchant_id,
-    )
-    if mapping_id is None:
-        mapping_id = uuid.uuid4()
-        await conn.execute(
-            """
-            INSERT INTO acquirer_merchant_mapping
-              (id, tenant_id, trazmo_entity_id, partner_entity_id,
-               acquirer_merchant_id, terminal_ids, status,
-               created_at, updated_at, version)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'ACTIVE',
-                    now(), now(), 0)
-            """,
-            mapping_id, handles.tenant_id, entity_id, handles.partner_entity_id,
-            acquirer_merchant_id,
-            ('["' + '","'.join(terminal_ids) + '"]') if terminal_ids else "[]",
-        )
-
+    client = _client_from_settings()
+    body = {
+        "partner_code": partner_code,
+        "sme_code": sme_code,
+        "legal_name": legal_name,
+        "owner_name": owner_name,
+        "mcc": mcc,
+        "country_code": country_code,
+        "timezone": timezone,
+        "acquirer_merchant_id": acquirer_merchant_id,
+        "terminal_ids": terminal_ids,
+    }
+    data = await client._post("/api/v1/_internal/mocksim/onboard-merchant", body)
     log.info(
         "trazmo.sme_onboarded",
         sme_code=sme_code,
-        entity_id=str(entity_id),
-        acquirer_merchant_id=acquirer_merchant_id,
+        entity_id=data["entity_id"],
+        acquirer_merchant_id=data["acquirer_merchant_id"],
+        created=[
+            k.removeprefix("created_") for k in data.keys()
+            if k.startswith("created_") and data[k]
+        ],
     )
     return OnboardedSme(
-        entity_id=entity_id,
-        sme_profile_id=sme_profile_id,
-        merchant_profile_id=merchant_profile_id,
-        acquirer_merchant_id=acquirer_merchant_id,
-        acquirer_mapping_id=mapping_id,
+        entity_id=uuid.UUID(data["entity_id"]),
+        sme_profile_id=uuid.UUID(data["sme_profile_id"]),
+        merchant_profile_id=uuid.UUID(data["merchant_profile_id"]),
+        acquirer_merchant_id=data["acquirer_merchant_id"],
+        acquirer_mapping_id=uuid.UUID(data["acquirer_mapping_id"]),
     )
-
-
-# ── Connection helper ────────────────────────────────────────────────────────
-
-
-async def connect(dsn: str) -> asyncpg.Connection:
-    """
-    Open a single asyncpg connection to trazmo-platform's postgres. Caller
-    owns close. We don't use a pool here because the endpoint is low-volume
-    (one onboarding click = one transaction) and avoiding a pool keeps the
-    blast radius small.
-    """
-    return await asyncpg.connect(dsn=dsn, timeout=10)

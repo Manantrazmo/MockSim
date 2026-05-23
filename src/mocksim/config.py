@@ -80,11 +80,16 @@ class Settings(BaseSettings):
     # password via the dashboard (Phase H).
     mocksim_bootstrap_password: str = "admin"
 
-    # ── Trazmo cross-system integration ───────────────────────────
-    # DSN for trazmo-platform's postgres. The cross-system onboarding
-    # endpoint (POST /admin/onboard-sme) writes entity / sme_profile /
-    # merchant_profile / acquirer_mapping rows directly into this DB.
-    # Empty = onboarding endpoint refuses to run.
+    # ── Trazmo cross-system integration (Phase H — authenticated) ─
+    # Cross-system onboarding now goes through trazmo's authenticated
+    # /api/v1/_internal/mocksim/* service surface, not direct PG writes.
+    # Both vars must be set; the token must match trazmo's
+    # MOCKSIM_SERVICE_TOKEN env var. Rotate together.
+    trazmo_api_url: str = ""
+    trazmo_service_token: str = ""
+    # Legacy DSN — kept for backward-compat with anything still calling
+    # the old asyncpg path (none currently); will be removed once the
+    # seed_e2e.py refactor lands.
     trazmo_database_url: str = ""
 
 

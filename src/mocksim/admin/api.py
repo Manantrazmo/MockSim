@@ -470,11 +470,13 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
     from mocksim.trazmo import client as trazmo_client
     from mocksim.clock import clock
 
-    if not cfg.trazmo_database_url:
+    # Phase H — onboarding now goes through trazmo's authenticated
+    # service API. TRAZMO_API_URL + TRAZMO_SERVICE_TOKEN must be set.
+    if not (cfg.trazmo_api_url and cfg.trazmo_service_token):
         from mocksim.core.errors import MockSimError, ErrorCode
         raise MockSimError(
             503, ErrorCode.INTERNAL_ERROR,
-            "Cross-system onboarding requires TRAZMO_DATABASE_URL to be set",
+            "Cross-system onboarding requires TRAZMO_API_URL + TRAZMO_SERVICE_TOKEN to be set",
         )
 
     tenant_id = uuid.UUID(body.mock_tenant_id)
@@ -496,45 +498,26 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
     slug = "".join(c if c.isalnum() else "_" for c in body.legal_name.upper())[:24].strip("_")
     sme_code = f"MS_{slug}"
 
-    # 3. Connect to trazmo + write all four rows in one transaction.
-    conn = await trazmo_client.connect(cfg.trazmo_database_url)
+    # 3. One HTTP call to trazmo — server runs the four inserts in one
+    # transaction and emits the audit event. No more direct PG writes.
     try:
-        async with conn.transaction():
-            handles = await trazmo_client.resolve_bootstrap(
-                conn,
-                partner_code=tenant.partner_code,
-                country_code=body.country_code,
-                timezone=body.timezone,
-            )
-
-            # Allocate acquirer_merchant_id if not supplied. Walk the existing
-            # ACQ-NNNNN sequence for this partner so collisions don't happen.
-            acquirer_id = body.acquirer_merchant_id
-            if not acquirer_id:
-                next_n = await conn.fetchval(
-                    """
-                    SELECT COALESCE(MAX(
-                      NULLIF(SUBSTRING(acquirer_merchant_id FROM '^ACQ-([0-9]+)$'), '')::int
-                    ), 0) + 1
-                      FROM acquirer_merchant_mapping
-                     WHERE partner_entity_id = $1
-                    """,
-                    handles.partner_entity_id,
-                )
-                acquirer_id = f"ACQ-{int(next_n):05d}"
-
-            onboarded = await trazmo_client.onboard_sme(
-                conn,
-                handles=handles,
-                sme_code=sme_code,
-                legal_name=body.legal_name,
-                owner_name=body.owner_name,
-                mcc=body.mcc,
-                acquirer_merchant_id=acquirer_id,
-                terminal_ids=[f"{acquirer_id}-T1"],
-            )
-    finally:
-        await conn.close()
+        onboarded = await trazmo_client.onboard_sme(
+            partner_code=tenant.partner_code,
+            sme_code=sme_code,
+            legal_name=body.legal_name,
+            owner_name=body.owner_name,
+            mcc=body.mcc,
+            country_code=body.country_code,
+            timezone=body.timezone,
+            acquirer_merchant_id=body.acquirer_merchant_id,
+        )
+        acquirer_id = onboarded.acquirer_merchant_id
+    except trazmo_client.TrazmoNotBootstrapped as exc:
+        from mocksim.core.errors import MockSimError, ErrorCode
+        raise MockSimError(409, ErrorCode.INTERNAL_ERROR, str(exc))
+    except trazmo_client.TrazmoServiceError as exc:
+        from mocksim.core.errors import MockSimError, ErrorCode
+        raise MockSimError(502, ErrorCode.INTERNAL_ERROR, str(exc))
 
     # 4. Create / reuse the MockSim merchant row with matching IDs.
     region_cfg = get_region(body.region)
@@ -591,23 +574,23 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
 
 @router.get("/trazmo/lenders")
 async def trazmo_lenders() -> dict[str, Any]:
-    """List trazmo's lender entities — feeds the MockSim UI lender dropdown."""
+    """List trazmo's lender entities via the authenticated service API."""
     from mocksim.config import settings as cfg
     from mocksim.trazmo import client as trazmo_client
-    if not cfg.trazmo_database_url:
+    if not (cfg.trazmo_api_url and cfg.trazmo_service_token):
         return {"lenders": [], "trazmo_configured": False}
-    conn = await trazmo_client.connect(cfg.trazmo_database_url)
     try:
-        rows = await trazmo_client.list_lenders(conn)
-        return {
-            "lenders": [
-                {"id": str(r.entity_id), "code": r.code, "legal_name": r.legal_name}
-                for r in rows
-            ],
-            "trazmo_configured": True,
-        }
-    finally:
-        await conn.close()
+        rows = await trazmo_client.list_lenders()
+    except trazmo_client.TrazmoServiceError as exc:
+        log.warning("admin.trazmo_lenders.service_error", status=exc.status)
+        return {"lenders": [], "trazmo_configured": True, "error": f"HTTP {exc.status}"}
+    return {
+        "lenders": [
+            {"id": str(r.entity_id), "code": r.code, "legal_name": r.legal_name}
+            for r in rows
+        ],
+        "trazmo_configured": True,
+    }
 
 
 class GeneratePosRequest(BaseModel):
@@ -683,30 +666,30 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
 
 @router.get("/trazmo/smes")
 async def trazmo_smes(partner_code: str) -> dict[str, Any]:
-    """List trazmo's SME entities for one partner — drives the existing-SMEs panel."""
+    """List trazmo's SME entities for one partner via the service API."""
     from mocksim.config import settings as cfg
     from mocksim.trazmo import client as trazmo_client
-    if not cfg.trazmo_database_url:
+    if not (cfg.trazmo_api_url and cfg.trazmo_service_token):
         return {"smes": [], "trazmo_configured": False}
-    conn = await trazmo_client.connect(cfg.trazmo_database_url)
     try:
-        rows = await trazmo_client.list_sme_entities(conn, partner_code=partner_code)
-        return {
-            "smes": [
-                {
-                    "id": str(r.entity_id),
-                    "code": r.code,
-                    "legal_name": r.legal_name,
-                    "acquirer_merchant_id": r.acquirer_merchant_id,
-                    "mcc": r.mcc,
-                    "status": r.status,
-                }
-                for r in rows
-            ],
-            "trazmo_configured": True,
-        }
-    finally:
-        await conn.close()
+        rows = await trazmo_client.list_sme_entities(partner_code=partner_code)
+    except trazmo_client.TrazmoServiceError as exc:
+        log.warning("admin.trazmo_smes.service_error", status=exc.status)
+        return {"smes": [], "trazmo_configured": True, "error": f"HTTP {exc.status}"}
+    return {
+        "smes": [
+            {
+                "id": str(r.entity_id),
+                "code": r.code,
+                "legal_name": r.legal_name,
+                "acquirer_merchant_id": r.acquirer_merchant_id,
+                "mcc": r.mcc,
+                "status": r.status,
+            }
+            for r in rows
+        ],
+        "trazmo_configured": True,
+    }
 
 
 # ── Recon ─────────────────────────────────────────────────────────

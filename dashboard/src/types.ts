@@ -83,6 +83,14 @@ export interface MerchantResponse {
   avg_ticket_minor_units: number
   risk_tier: RiskTier
   status: MerchantStatus
+  // Bridge IDs to trazmo. Populated when the merchant was onboarded via
+  // the trazmo-aware flow (Onboarding page / /admin/onboard-sme). Null
+  // for MockSim-only merchants (the seed_default baseline ones).
+  //   acquirer_merchant_id matches trazmo.acquirer_merchant_mapping
+  //     and is the key the settlement webhook payload carries.
+  //   external_entity_id is trazmo's entity.id UUID, for traceability.
+  acquirer_merchant_id: string | null
+  external_entity_id: string | null
   created_at: string
 }
 

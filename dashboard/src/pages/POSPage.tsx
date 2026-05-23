@@ -61,6 +61,10 @@ export default function POSPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [genDays, setGenDays] = useState(7)
   const [genBackfill, setGenBackfill] = useState(true)
+  // Merchant table search — name / id / acquirer_merchant_id (the bridge to
+  // trazmo). Substring + case-insensitive. Filters client-side so that
+  // "select all" still respects the current view.
+  const [merchantSearch, setMerchantSearch] = useState('')
   const generate = useMutation({
     mutationFn: () => generatePos(Array.from(selected), genDays, genBackfill),
     onSuccess: () => {
@@ -84,6 +88,17 @@ export default function POSPage() {
     refetchInterval: 30_000,
     enabled: !!tenantKey,
   })
+
+  const filteredMerchants = useMemo(() => {
+    const all = merchantsQuery.data ?? []
+    const q = merchantSearch.trim().toLowerCase()
+    if (!q) return all
+    return all.filter((m) =>
+      m.name.toLowerCase().includes(q) ||
+      m.id.toLowerCase().includes(q) ||
+      (m.acquirer_merchant_id ?? '').toLowerCase().includes(q),
+    )
+  }, [merchantsQuery.data, merchantSearch])
 
   const txParams: TransactionQueryParams = {
     limit: 50,
@@ -140,6 +155,22 @@ export default function POSPage() {
               <span>{merchantsQuery.data.length} records</span>
             )}
           </div>
+        </div>
+
+        {/* Merchant search — name / local ID / acquirer_merchant_id (bridge to trazmo) */}
+        <div className="mb-3">
+          <input
+            type="text"
+            placeholder="Search merchants by name, ID, or acquirer_merchant_id (e.g. ACQ-00027)…"
+            value={merchantSearch}
+            onChange={(e) => setMerchantSearch(e.target.value)}
+            className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          />
+          {merchantSearch && (
+            <div className="text-xs text-slate-500 mt-1">
+              Showing {filteredMerchants.length} of {merchantsQuery.data?.length ?? 0}
+            </div>
+          )}
         </div>
 
         {/* Phase F4 — multi-select POS generation toolbar */}
@@ -208,15 +239,16 @@ export default function POSPage() {
                     <input
                       type="checkbox"
                       checked={
-                        (merchantsQuery.data?.length ?? 0) > 0 &&
-                        selected.size === (merchantsQuery.data?.length ?? 0)
+                        filteredMerchants.length > 0 &&
+                        filteredMerchants.every((m) => selected.has(m.id))
                       }
-                      onChange={() => toggleAll((merchantsQuery.data ?? []).map((m) => m.id))}
+                      onChange={() => toggleAll(filteredMerchants.map((m) => m.id))}
                       className="rounded"
                     />
                   </th>
                   {[
                     'ID',
+                    'Acquirer ID',
                     'Name',
                     'Region',
                     'MCC',
@@ -238,18 +270,20 @@ export default function POSPage() {
               <tbody className="divide-y divide-slate-700/50">
                 {merchantsQuery.isLoading ? (
                   <tr>
-                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
+                    <td colSpan={11} className="px-3 py-6 text-center text-slate-500">
                       Loading merchants…
                     </td>
                   </tr>
-                ) : (merchantsQuery.data ?? []).length === 0 ? (
+                ) : filteredMerchants.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
-                      No merchants found.
+                    <td colSpan={11} className="px-3 py-6 text-center text-slate-500">
+                      {merchantSearch
+                        ? `No merchants match "${merchantSearch}".`
+                        : 'No merchants found.'}
                     </td>
                   </tr>
                 ) : (
-                  (merchantsQuery.data ?? []).map((m) => (
+                  filteredMerchants.map((m) => (
                     <tr
                       key={m.id}
                       className={`${
@@ -266,6 +300,11 @@ export default function POSPage() {
                       </td>
                       <td className="px-3 py-2 text-slate-400 font-mono">
                         <span title={m.id}>{truncateId(m.id, 10)}</span>
+                      </td>
+                      <td className="px-3 py-2 text-indigo-300 font-mono">
+                        {m.acquirer_merchant_id ?? (
+                          <span className="text-slate-600 italic">— local —</span>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-slate-200">{m.name}</td>
                       <td className="px-3 py-2 text-slate-400">{m.region}</td>

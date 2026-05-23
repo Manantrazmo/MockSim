@@ -8,6 +8,7 @@ import {
   Settings,
   Activity,
   FlaskConical,
+  UserPlus,
 } from 'lucide-react'
 
 interface NavItem {
@@ -18,6 +19,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { to: '/overview', label: 'Overview', icon: <Home size={16} /> },
+  { to: '/onboarding', label: 'Onboarding', icon: <UserPlus size={16} /> },
   { to: '/pos', label: 'POS', icon: <ShoppingCart size={16} /> },
   { to: '/bank', label: 'Bank', icon: <CreditCard size={16} /> },
   { to: '/webhooks', label: 'Webhooks', icon: <Bell size={16} /> },

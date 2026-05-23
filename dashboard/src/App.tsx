@@ -7,6 +7,7 @@ import WebhooksPage from './pages/WebhooksPage'
 import ScenariosPage from './pages/ScenariosPage'
 import SettingsPage from './pages/SettingsPage'
 import PlaygroundPage from './pages/PlaygroundPage'
+import OnboardingPage from './pages/OnboardingPage'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
       <Route element={<Layout />}>
         <Route index element={<Navigate to="/overview" replace />} />
         <Route path="/overview" element={<Overview />} />
+        <Route path="/onboarding" element={<OnboardingPage />} />
         <Route path="/pos" element={<POSPage />} />
         <Route path="/bank" element={<BankPage />} />
         <Route path="/webhooks" element={<WebhooksPage />} />

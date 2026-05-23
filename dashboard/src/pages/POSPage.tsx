@@ -1,9 +1,33 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { RefreshCw, AlertTriangle, KeyRound } from 'lucide-react'
+import { useState, useMemo } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { RefreshCw, AlertTriangle, KeyRound, Zap } from 'lucide-react'
 import { api } from '../api'
 import StatusBadge from '../components/StatusBadge'
 import type { TransactionQueryParams } from '../types'
+
+// Phase F4: backend endpoint /admin/generate-pos shape
+interface GeneratePosResult {
+  results: Record<string, {
+    name: string
+    acquirer_merchant_id: string | null
+    txns_per_day: number[]
+    txns_total: number
+  }>
+  total_txns: number
+  dates: string[]
+}
+
+async function generatePos(merchantIds: string[], days: number, backfill: boolean) {
+  const base = localStorage.getItem('apiBaseUrl') ?? ''
+  const token = localStorage.getItem('adminToken') ?? ''
+  const res = await fetch(`${base}/api/v1/admin/generate-pos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ merchant_ids: merchantIds, days, backfill }),
+  })
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  return res.json() as Promise<GeneratePosResult>
+}
 
 function formatMinorUnits(minor: number, currency: string): string {
   try {
@@ -24,9 +48,31 @@ function truncateId(id: string, len = 12): string {
 
 export default function POSPage() {
   const tenantKey = localStorage.getItem('tenantApiKey')
+  const qc = useQueryClient()
   const [merchantFilter, setMerchantFilter] = useState('')
   const [simDateFilter, setSimDateFilter] = useState('')
   const [settlementFilter, setSettlementFilter] = useState('')
+
+  // Phase F4 — multi-select POS generation
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [genDays, setGenDays] = useState(7)
+  const [genBackfill, setGenBackfill] = useState(true)
+  const generate = useMutation({
+    mutationFn: () => generatePos(Array.from(selected), genDays, genBackfill),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['transactions'] })
+      qc.invalidateQueries({ queryKey: ['stats'] })
+    },
+  })
+  const toggleAll = (allIds: string[]) =>
+    setSelected((s) => (s.size === allIds.length ? new Set() : new Set(allIds)))
+  const toggleOne = (id: string) =>
+    setSelected((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
 
   const merchantsQuery = useQuery({
     queryKey: ['merchants'],
@@ -92,6 +138,54 @@ export default function POSPage() {
           </div>
         </div>
 
+        {/* Phase F4 — multi-select POS generation toolbar */}
+        <div className="flex items-center gap-3 mb-3 px-4 py-2.5 bg-slate-800/60 border border-slate-700 rounded-xl text-xs">
+          <span className="text-slate-400">
+            {selected.size > 0
+              ? `${selected.size} selected`
+              : 'Select merchants → generate POS for them'}
+          </span>
+          <div className="flex items-center gap-1 ml-auto">
+            <label className="text-slate-500">Days</label>
+            <input
+              type="number" min={1} max={180}
+              value={genDays}
+              onChange={(e) => setGenDays(Math.max(1, Math.min(180, +e.target.value)))}
+              className="w-16 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100"
+            />
+            <label className="text-slate-500 ml-2 flex items-center gap-1 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={genBackfill}
+                onChange={(e) => setGenBackfill(e.target.checked)}
+              />
+              Backfill (past dates)
+            </label>
+            <button
+              disabled={selected.size === 0 || generate.isPending}
+              onClick={() => generate.mutate()}
+              className="ml-2 flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed text-white rounded-lg px-3 py-1.5"
+            >
+              {generate.isPending ? (
+                <RefreshCw size={12} className="animate-spin" />
+              ) : (
+                <Zap size={12} />
+              )}
+              Generate POS
+            </button>
+          </div>
+        </div>
+        {generate.data && (
+          <div className="mb-3 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-xs text-emerald-300">
+            ✓ Generated {generate.data.total_txns.toLocaleString()} transactions across {Object.keys(generate.data.results).length} merchant(s) over {generate.data.dates.length} day(s)
+          </div>
+        )}
+        {generate.error && (
+          <div className="mb-3 px-4 py-2 bg-rose-500/10 border border-rose-500/20 rounded-xl text-xs text-rose-300">
+            ✗ {(generate.error as Error).message}
+          </div>
+        )}
+
         {merchantsQuery.isError && (
           <div className="flex items-center gap-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-2">
             <AlertTriangle size={13} />
@@ -106,6 +200,17 @@ export default function POSPage() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="bg-slate-800 border-b border-slate-700">
+                  <th className="px-3 py-2.5 w-8">
+                    <input
+                      type="checkbox"
+                      checked={
+                        (merchantsQuery.data?.length ?? 0) > 0 &&
+                        selected.size === (merchantsQuery.data?.length ?? 0)
+                      }
+                      onChange={() => toggleAll((merchantsQuery.data ?? []).map((m) => m.id))}
+                      className="rounded"
+                    />
+                  </th>
                   {[
                     'ID',
                     'Name',
@@ -129,13 +234,13 @@ export default function POSPage() {
               <tbody className="divide-y divide-slate-700/50">
                 {merchantsQuery.isLoading ? (
                   <tr>
-                    <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
+                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
                       Loading merchants…
                     </td>
                   </tr>
                 ) : (merchantsQuery.data ?? []).length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
+                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
                       No merchants found.
                     </td>
                   </tr>
@@ -143,8 +248,18 @@ export default function POSPage() {
                   (merchantsQuery.data ?? []).map((m) => (
                     <tr
                       key={m.id}
-                      className="bg-slate-800/50 hover:bg-slate-800 transition-colors"
+                      className={`${
+                        selected.has(m.id) ? 'bg-indigo-500/10' : 'bg-slate-800/50'
+                      } hover:bg-slate-800 transition-colors`}
                     >
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(m.id)}
+                          onChange={() => toggleOne(m.id)}
+                          className="rounded"
+                        />
+                      </td>
                       <td className="px-3 py-2 text-slate-400 font-mono">
                         <span title={m.id}>{truncateId(m.id, 10)}</span>
                       </td>

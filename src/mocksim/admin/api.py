@@ -20,6 +20,7 @@ from mocksim.persistence.database import async_session_factory
 from mocksim.persistence.models import (
     ApiKey,
     ClockAdvanceJob,
+    Merchant,
     MockTenant,
     ScenarioEngineStatus,
     WebhookOutbox,
@@ -109,6 +110,27 @@ class CreateTenantRequest(BaseModel):
     # When set, the trazmo_settlement webhook emitter will use this in the
     # outbound payload's `partner_code` field.
     partner_code: str | None = Field(default=None, max_length=64)
+
+
+@router.get("/tenants")
+async def list_tenants() -> dict[str, Any]:
+    """List all MockSim tenants — feeds the dashboard's tenant selector."""
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(MockTenant).order_by(MockTenant.created_at)
+        )
+        rows = result.scalars().all()
+    return {
+        "tenants": [
+            {
+                "id": str(t.id),
+                "name": t.name,
+                "partner_code": t.partner_code,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in rows
+        ]
+    }
 
 
 @router.post("/tenants")
@@ -390,6 +412,301 @@ async def bulk_seed(request: Request) -> dict[str, Any]:
     """Bulk-create merchants + historical txns — Phase 1."""
     from mocksim.core.errors import not_implemented_yet
     raise not_implemented_yet("POST /admin/seed")
+
+
+# ── Cross-system SME onboarding ──────────────────────────────────
+# These endpoints write to BOTH trazmo's postgres and MockSim's own in
+# a single click. The UI flow is: Operator opens MockSim dashboard →
+# fills the "Add SME" form → backend creates the four trazmo rows
+# (entity, sme_profile, merchant_profile, acquirer_mapping) AND the
+# MockSim merchant row, all with the same acquirer_merchant_id. From
+# that moment on, every settlement webhook MockSim emits gets attributed
+# to the right entity on the trazmo side.
+
+
+class OnboardSmeRequest(BaseModel):
+    legal_name: str = Field(..., min_length=2, max_length=200)
+    owner_name: str = Field(..., min_length=2, max_length=200)
+    region: str = Field(..., pattern="^[A-Z]{2}$")
+    mcc: str = Field(..., pattern=r"^\d{4}$")
+    expected_daily_txns: int = Field(80, ge=1, le=10000)
+    avg_ticket_major_units: float = Field(1500.0, gt=0)
+    risk_tier: str = Field("standard", pattern="^(low|standard|high)$")
+    contact_email: str | None = Field(default=None, max_length=200)
+    contact_phone: str | None = Field(default=None, max_length=50)
+    # If omitted, server auto-generates the next ACQ-NNNNN slot.
+    acquirer_merchant_id: str | None = Field(default=None, max_length=64)
+    # Trazmo tenant context. mock_tenant.partner_code is required to be
+    # set before this endpoint can be called.
+    mock_tenant_id: str
+    # Country/timezone — defaults match trazmo's PK seed.
+    country_code: str = Field("PK", min_length=2, max_length=2)
+    timezone: str = Field("Asia/Karachi", max_length=64)
+
+
+class OnboardSmeResponse(BaseModel):
+    mocksim_merchant_id: str
+    acquirer_merchant_id: str
+    trazmo_entity_id: str
+    trazmo_sme_profile_id: str
+    trazmo_merchant_profile_id: str
+    trazmo_mapping_id: str
+    onboarded: bool
+
+
+@router.post("/onboard-sme", response_model=OnboardSmeResponse, status_code=201)
+async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
+    """
+    Cross-system SME onboarding — writes to trazmo's postgres AND MockSim's
+    own merchants table in the same flow.
+
+    Idempotent on either side via stable `sme_code` (slug of legal_name)
+    and the unique constraint on (mock_tenant_id, acquirer_merchant_id).
+    """
+    from mocksim.config import settings as cfg
+    from mocksim.core.identifiers import new_ulid
+    from mocksim.pos.regions import get_region
+    from mocksim.pos.generator import schedule_initial_generation
+    from mocksim.trazmo import client as trazmo_client
+    from mocksim.clock import clock
+
+    if not cfg.trazmo_database_url:
+        from mocksim.core.errors import MockSimError, ErrorCode
+        raise MockSimError(
+            503, ErrorCode.INTERNAL_ERROR,
+            "Cross-system onboarding requires TRAZMO_DATABASE_URL to be set",
+        )
+
+    tenant_id = uuid.UUID(body.mock_tenant_id)
+
+    # 1. Look up MockSim tenant + partner_code.
+    async with async_session_factory() as session:
+        t = await session.execute(
+            select(MockTenant).where(MockTenant.id == tenant_id)
+        )
+        tenant = t.scalar_one_or_none()
+        if tenant is None or not tenant.partner_code:
+            from mocksim.core.errors import MockSimError, ErrorCode
+            raise MockSimError(
+                400, ErrorCode.INTERNAL_ERROR,
+                f"MockSim tenant {tenant_id} has no partner_code — required for onboarding",
+            )
+
+    # 2. Pre-compute the stable SME code from the legal_name slug.
+    slug = "".join(c if c.isalnum() else "_" for c in body.legal_name.upper())[:24].strip("_")
+    sme_code = f"MS_{slug}"
+
+    # 3. Connect to trazmo + write all four rows in one transaction.
+    conn = await trazmo_client.connect(cfg.trazmo_database_url)
+    try:
+        async with conn.transaction():
+            handles = await trazmo_client.resolve_bootstrap(
+                conn,
+                partner_code=tenant.partner_code,
+                country_code=body.country_code,
+                timezone=body.timezone,
+            )
+
+            # Allocate acquirer_merchant_id if not supplied. Walk the existing
+            # ACQ-NNNNN sequence for this partner so collisions don't happen.
+            acquirer_id = body.acquirer_merchant_id
+            if not acquirer_id:
+                next_n = await conn.fetchval(
+                    """
+                    SELECT COALESCE(MAX(
+                      NULLIF(SUBSTRING(acquirer_merchant_id FROM '^ACQ-([0-9]+)$'), '')::int
+                    ), 0) + 1
+                      FROM acquirer_merchant_mapping
+                     WHERE partner_entity_id = $1
+                    """,
+                    handles.partner_entity_id,
+                )
+                acquirer_id = f"ACQ-{int(next_n):05d}"
+
+            onboarded = await trazmo_client.onboard_sme(
+                conn,
+                handles=handles,
+                sme_code=sme_code,
+                legal_name=body.legal_name,
+                owner_name=body.owner_name,
+                mcc=body.mcc,
+                acquirer_merchant_id=acquirer_id,
+                terminal_ids=[f"{acquirer_id}-T1"],
+            )
+    finally:
+        await conn.close()
+
+    # 4. Create / reuse the MockSim merchant row with matching IDs.
+    region_cfg = get_region(body.region)
+    decimals = 2 if region_cfg.currency != "BHD" else 3
+    avg_minor = int(body.avg_ticket_major_units * (10 ** decimals))
+    now = datetime.now(timezone.utc)
+
+    async with async_session_factory() as session:
+        existing = await session.execute(
+            select(Merchant).where(
+                Merchant.mock_tenant_id == tenant_id,
+                Merchant.acquirer_merchant_id == acquirer_id,
+            )
+        )
+        merchant = existing.scalar_one_or_none()
+        if merchant is None:
+            mid = f"MID_{new_ulid()[:8].upper()}"
+            merchant = Merchant(
+                id=mid,
+                mock_tenant_id=tenant_id,
+                trazmo_tenant_id=None,
+                acquirer_merchant_id=acquirer_id,
+                external_entity_id=str(onboarded.entity_id),
+                region=body.region,
+                name=body.legal_name,
+                mcc=body.mcc,
+                expected_daily_txns=body.expected_daily_txns,
+                avg_ticket_minor_units=avg_minor,
+                currency=region_cfg.currency,
+                risk_tier=body.risk_tier,
+                status="active",
+                created_at=now,
+            )
+            session.add(merchant)
+            await session.flush()
+            # Kick off the generator so this merchant produces GMV from today.
+            await schedule_initial_generation(session, tenant_id, mid, clock.now().date())
+            await session.commit()
+            log.info("admin.sme_onboarded",
+                     mocksim_merchant_id=mid,
+                     trazmo_entity_id=str(onboarded.entity_id),
+                     acquirer_merchant_id=acquirer_id)
+
+    return OnboardSmeResponse(
+        mocksim_merchant_id=merchant.id,
+        acquirer_merchant_id=acquirer_id,
+        trazmo_entity_id=str(onboarded.entity_id),
+        trazmo_sme_profile_id=str(onboarded.sme_profile_id),
+        trazmo_merchant_profile_id=str(onboarded.merchant_profile_id or ""),
+        trazmo_mapping_id=str(onboarded.acquirer_mapping_id),
+        onboarded=True,
+    )
+
+
+@router.get("/trazmo/lenders")
+async def trazmo_lenders() -> dict[str, Any]:
+    """List trazmo's lender entities — feeds the MockSim UI lender dropdown."""
+    from mocksim.config import settings as cfg
+    from mocksim.trazmo import client as trazmo_client
+    if not cfg.trazmo_database_url:
+        return {"lenders": [], "trazmo_configured": False}
+    conn = await trazmo_client.connect(cfg.trazmo_database_url)
+    try:
+        rows = await trazmo_client.list_lenders(conn)
+        return {
+            "lenders": [
+                {"id": str(r.entity_id), "code": r.code, "legal_name": r.legal_name}
+                for r in rows
+            ],
+            "trazmo_configured": True,
+        }
+    finally:
+        await conn.close()
+
+
+class GeneratePosRequest(BaseModel):
+    merchant_ids: list[str] = Field(..., min_length=1, max_length=100)
+    days: int = Field(1, ge=1, le=180)
+    # If set, generate retroactively from N days ago; otherwise from today
+    # forward. Most demo flows want "give me last 7 days of GMV" → backfill=true.
+    backfill: bool = True
+
+
+@router.post("/generate-pos")
+async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]:
+    """
+    Force-fire the POS generator for a specific set of merchants over N
+    consecutive sim-dates. Bypasses the sim clock so the operator can
+    populate Flux with realistic GMV without waiting for the clock to tick.
+
+    For each (merchant, date) we call pos.generator.generate_merchant_day
+    directly. Returns counts of transactions produced per merchant.
+    """
+    from datetime import date as _date, timedelta
+    from mocksim.clock import clock as _clock
+    from mocksim.pos.generator import generate_merchant_day
+
+    today = _clock.now().date()
+    if body.backfill:
+        start = today - timedelta(days=body.days - 1)
+        dates = [start + timedelta(days=i) for i in range(body.days)]
+    else:
+        dates = [today + timedelta(days=i) for i in range(body.days)]
+
+    results: dict[str, dict[str, Any]] = {}
+
+    async with async_session_factory() as session:
+        # Lookup tenant per merchant — admin endpoint, so we accept any tenant.
+        merchants_q = await session.execute(
+            select(Merchant).where(Merchant.id.in_(body.merchant_ids))
+        )
+        merchants = list(merchants_q.scalars().all())
+
+    if not merchants:
+        return {"results": {}, "total_txns": 0, "warning": "no matching merchants found"}
+
+    total = 0
+    for m in merchants:
+        per_day: list[int] = []
+        for d in dates:
+            try:
+                count = await generate_merchant_day(
+                    mock_tenant_id=m.mock_tenant_id,
+                    merchant_id=m.id,
+                    sim_date=d,
+                )
+                per_day.append(count)
+                total += count
+            except Exception as exc:  # noqa: BLE001
+                log.warning("admin.generate_pos.failed",
+                            merchant_id=m.id, date=d.isoformat(), error=str(exc))
+                per_day.append(0)
+        results[m.id] = {
+            "name": m.name,
+            "acquirer_merchant_id": m.acquirer_merchant_id,
+            "txns_per_day": per_day,
+            "txns_total": sum(per_day),
+        }
+
+    return {
+        "results": results,
+        "total_txns": total,
+        "dates": [d.isoformat() for d in dates],
+    }
+
+
+@router.get("/trazmo/smes")
+async def trazmo_smes(partner_code: str) -> dict[str, Any]:
+    """List trazmo's SME entities for one partner — drives the existing-SMEs panel."""
+    from mocksim.config import settings as cfg
+    from mocksim.trazmo import client as trazmo_client
+    if not cfg.trazmo_database_url:
+        return {"smes": [], "trazmo_configured": False}
+    conn = await trazmo_client.connect(cfg.trazmo_database_url)
+    try:
+        rows = await trazmo_client.list_sme_entities(conn, partner_code=partner_code)
+        return {
+            "smes": [
+                {
+                    "id": str(r.entity_id),
+                    "code": r.code,
+                    "legal_name": r.legal_name,
+                    "acquirer_merchant_id": r.acquirer_merchant_id,
+                    "mcc": r.mcc,
+                    "status": r.status,
+                }
+                for r in rows
+            ],
+            "trazmo_configured": True,
+        }
+    finally:
+        await conn.close()
 
 
 # ── Recon ─────────────────────────────────────────────────────────

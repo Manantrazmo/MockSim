@@ -203,6 +203,82 @@ async function pingTenant(): Promise<{ ok: boolean; latencyMs: number }> {
   }
 }
 
+// ─── Cross-system onboarding (Phase F) ───────────────────────────────────────
+
+export interface MockTenant {
+  id: string
+  name: string
+  partner_code: string | null
+  created_at: string
+}
+
+export interface TrazmoLender {
+  id: string
+  code: string
+  legal_name: string
+}
+
+export interface TrazmoSme {
+  id: string
+  code: string
+  legal_name: string
+  acquirer_merchant_id: string | null
+  mcc: string | null
+  status: string
+}
+
+export interface OnboardSmeRequest {
+  legal_name: string
+  owner_name: string
+  region: string
+  mcc: string
+  expected_daily_txns: number
+  avg_ticket_major_units: number
+  risk_tier: string
+  contact_email?: string
+  contact_phone?: string
+  acquirer_merchant_id?: string
+  mock_tenant_id: string
+  country_code?: string
+  timezone?: string
+}
+
+export interface OnboardSmeResponse {
+  mocksim_merchant_id: string
+  acquirer_merchant_id: string
+  trazmo_entity_id: string
+  trazmo_sme_profile_id: string
+  trazmo_merchant_profile_id: string
+  trazmo_mapping_id: string
+  onboarded: boolean
+}
+
+async function listTenants(): Promise<MockTenant[]> {
+  const res = await fetch(u('/api/v1/admin/tenants'), { headers: getAdminHeaders() })
+  const body = await handleResponse<{ tenants: MockTenant[] }>(res)
+  return body.tenants
+}
+
+async function trazmoLenders(): Promise<{ lenders: TrazmoLender[]; trazmo_configured: boolean }> {
+  const res = await fetch(u('/api/v1/admin/trazmo/lenders'), { headers: getAdminHeaders() })
+  return handleResponse(res)
+}
+
+async function trazmoSmes(partnerCode: string): Promise<{ smes: TrazmoSme[]; trazmo_configured: boolean }> {
+  const q = new URLSearchParams({ partner_code: partnerCode }).toString()
+  const res = await fetch(u(`/api/v1/admin/trazmo/smes?${q}`), { headers: getAdminHeaders() })
+  return handleResponse(res)
+}
+
+async function onboardSme(body: OnboardSmeRequest): Promise<OnboardSmeResponse> {
+  const res = await fetch(u('/api/v1/admin/onboard-sme'), {
+    method: 'POST',
+    headers: getAdminHeaders(),
+    body: JSON.stringify(body),
+  })
+  return handleResponse(res)
+}
+
 // ─── Exported API object ──────────────────────────────────────────────────────
 
 export const api = {
@@ -221,4 +297,8 @@ export const api = {
   payments,
   ping,
   pingTenant,
+  listTenants,
+  trazmoLenders,
+  trazmoSmes,
+  onboardSme,
 }

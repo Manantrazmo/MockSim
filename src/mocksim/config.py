@@ -71,5 +71,12 @@ class Settings(BaseSettings):
     otlp_endpoint: str | None = None
     log_level: str = "INFO"
 
+    # ── Trazmo cross-system integration ───────────────────────────
+    # DSN for trazmo-platform's postgres. The cross-system onboarding
+    # endpoint (POST /admin/onboard-sme) writes entity / sme_profile /
+    # merchant_profile / acquirer_mapping rows directly into this DB.
+    # Empty = onboarding endpoint refuses to run.
+    trazmo_database_url: str = ""
+
 
 settings = Settings()

@@ -415,6 +415,19 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
 
+- **2026-05-23 (session 2 — Phase F)** — Cross-system SME onboarding.
+  New `mocksim.trazmo` backend module talks directly to trazmo's
+  postgres. Three new admin endpoints: `GET /admin/tenants`,
+  `POST /admin/onboard-sme` (creates entity+sme_profile+merchant_profile+
+  acquirer_mapping in trazmo AND merchant row in MockSim, in one call),
+  `POST /admin/generate-pos` (force-fires generator for selected
+  merchants over N days, bypasses sim clock). New `OnboardingPage` in
+  MockSim UI with single + bulk modes, lists existing trazmo SMEs in
+  real time. POSPage augmented with multi-select checkboxes +
+  "Generate POS" toolbar. End-to-end verified: one click in MockSim UI →
+  entity appears in trazmo PG (ACQ-00025) → 224 txns generated across
+  3 days. 112/112 tests pass.
+
 - **2026-05-23 (session 1)** — Brought MockSim up from cold, fixed five
   bring-up bugs (hatchling editable install, pydantic-settings list parse,
   SQLAlchemy ORM event target, alembic async driver, tenant filter mixin),

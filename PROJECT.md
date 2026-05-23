@@ -415,6 +415,23 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
 
+- **2026-05-23 (session 5 — Phase I)** — Bulk onboard ULID collision +
+  synthetic KYC documents. Two issues hit during the bulk-SME demo:
+  (1) `merchants.id = f"MID_{new_ulid()[:8]}"` collided whenever two
+  bulk inserts landed in the same millisecond — ULID's first 8 chars
+  are timestamp-only. Fixed by using the random tail of the ULID
+  instead. (2) Operator asked for dummy KYC documents on onboarding.
+  New `mocksim.synth.documents` generator produces region-aware CNIC /
+  Emirates-ID / Saudi-ID / Bahrain-CPR / Egypt-ID + NTN + bank
+  statement metadata + business registration + utility bill, all with
+  plausible numbers (PK CNIC format `42101-1234567-8`, NTN `1217679-2`,
+  etc.) seeded by `acquirer_merchant_id` so re-runs are reproducible.
+  Migration 0005 adds `merchants.synthetic_documents` JSONB. Frontend:
+  "Generate dummy KYC documents" toggle + per-type override chips +
+  expandable doc list in the recent-onboardings activity log. 112/112
+  tests pass. Verified: bulk-5 onboard with documents produces unique
+  IDs and 5 docs each.
+
 - **2026-05-23 (session 4 — Phase H)** — Service auth for cross-system
   writes. Previously MockSim wrote directly to trazmo's postgres via
   asyncpg INSERTs — anyone with network access to :5433 could do

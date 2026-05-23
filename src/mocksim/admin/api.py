@@ -442,6 +442,14 @@ class OnboardSmeRequest(BaseModel):
     # Country/timezone — defaults match trazmo's PK seed.
     country_code: str = Field("PK", min_length=2, max_length=2)
     timezone: str = Field("Asia/Karachi", max_length=64)
+    # Phase I: synthetic KYC document generation. When True, the
+    # onboard endpoint generates region-appropriate fake-but-plausible
+    # documents (CNIC/Emirates-ID/etc., NTN, bank statement, business
+    # registration, utility bill) and stores them on the merchant row.
+    # `document_types` overrides the regional default; null = "all
+    # defaults for the region".
+    generate_documents: bool = False
+    document_types: list[str] | None = Field(default=None)
 
 
 class OnboardSmeResponse(BaseModel):
@@ -452,6 +460,9 @@ class OnboardSmeResponse(BaseModel):
     trazmo_merchant_profile_id: str
     trazmo_mapping_id: str
     onboarded: bool
+    # Phase I — synthetic documents that were generated for this SME.
+    # Empty when generate_documents=False (the default).
+    synthetic_documents: list[dict[str, Any]] = Field(default_factory=list)
 
 
 @router.post("/onboard-sme", response_model=OnboardSmeResponse, status_code=201)
@@ -533,8 +544,34 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
             )
         )
         merchant = existing.scalar_one_or_none()
+        # Phase I — generate synthetic KYC documents on demand. Stable on
+        # acquirer_merchant_id so re-running the bulk onboard yields the
+        # same CNIC/NTN/etc. numbers, which keeps subsequent demo
+        # screenshots reproducible.
+        synthetic_docs: list[dict[str, Any]] = []
+        if body.generate_documents:
+            from mocksim.synth.documents import generate_documents as _gen_docs
+            synthetic_docs = _gen_docs(
+                region=body.region,
+                seed=acquirer_id,
+                types=body.document_types,
+            )
+            log.info(
+                "admin.sme_onboarded.documents",
+                acquirer_merchant_id=acquirer_id,
+                doc_count=len(synthetic_docs),
+                types=[d["type"] for d in synthetic_docs],
+            )
+
         if merchant is None:
-            mid = f"MID_{new_ulid()[:8].upper()}"
+            # ULID's first 8 chars are timestamp-only — bulk onboards inside
+            # the same millisecond collided on merchants.id. Use a chunk
+            # from the random tail (chars 18..28 of a 26-char ULID, padded
+            # with uuid4 if for some reason ULID is shorter than expected)
+            # so the suffix is actually random.
+            ulid_str = new_ulid()
+            random_suffix = ulid_str[-10:] if len(ulid_str) >= 10 else uuid.uuid4().hex[:10]
+            mid = f"MID_{random_suffix.upper()}"
             merchant = Merchant(
                 id=mid,
                 mock_tenant_id=tenant_id,
@@ -549,6 +586,7 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
                 currency=region_cfg.currency,
                 risk_tier=body.risk_tier,
                 status="active",
+                synthetic_documents=synthetic_docs or None,
                 created_at=now,
             )
             session.add(merchant)
@@ -569,6 +607,7 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
         trazmo_merchant_profile_id=str(onboarded.merchant_profile_id or ""),
         trazmo_mapping_id=str(onboarded.acquirer_mapping_id),
         onboarded=True,
+        synthetic_documents=(merchant.synthetic_documents or []),
     )
 
 

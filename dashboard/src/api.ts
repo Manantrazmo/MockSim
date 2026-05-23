@@ -231,6 +231,18 @@ export interface TrazmoSme {
   status: string
 }
 
+export interface SyntheticDocument {
+  type: string
+  number: string
+  issued_at: string
+  expires_at: string | null
+  issuer: string
+  file_uri: string | null
+  region: string | null
+  metadata: Record<string, unknown>
+  generated_at?: string
+}
+
 export interface OnboardSmeRequest {
   legal_name: string
   owner_name: string
@@ -245,6 +257,8 @@ export interface OnboardSmeRequest {
   mock_tenant_id: string
   country_code?: string
   timezone?: string
+  generate_documents?: boolean
+  document_types?: string[] | null
 }
 
 export interface OnboardSmeResponse {
@@ -255,6 +269,7 @@ export interface OnboardSmeResponse {
   trazmo_merchant_profile_id: string
   trazmo_mapping_id: string
   onboarded: boolean
+  synthetic_documents: SyntheticDocument[]
 }
 
 async function listTenants(): Promise<MockTenant[]> {

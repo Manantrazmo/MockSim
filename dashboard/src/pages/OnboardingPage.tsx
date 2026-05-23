@@ -101,6 +101,30 @@ export default function OnboardingPage() {
   const [bulkCount, setBulkCount] = useState(5)
   const [bulkPrefix, setBulkPrefix] = useState('Acme')
 
+  // ── Synthetic documents (Phase I) ───────────────────────────────────
+  // Region-aware default set; the operator can override to any subset.
+  // We don't hard-code the full type list here — `null` means "let the
+  // server pick the regional defaults" which is the right behaviour
+  // when bulk-onboarding across mixed regions later.
+  const [generateDocuments, setGenerateDocuments] = useState(true)
+  const [docTypeOverride, setDocTypeOverride] = useState<string[] | null>(null)
+  const docTypesForRegion = (r: Region): string[] => {
+    const ids: Record<Region, string[]> = {
+      PK: ['CNIC', 'NTN'],
+      AE: ['EMIRATES_ID'],
+      SA: ['SAUDI_NATIONAL_ID'],
+      EG: ['EGYPT_NATIONAL_ID'],
+      BH: ['BAHRAIN_CPR'],
+    }
+    return [...ids[r], 'BANK_STATEMENT', 'BUSINESS_REGISTRATION', 'UTILITY_BILL']
+  }
+  const effectiveDocTypes = docTypeOverride ?? docTypesForRegion(form.region)
+  const toggleDocType = (t: string) => {
+    const current = docTypeOverride ?? docTypesForRegion(form.region)
+    const next = current.includes(t) ? current.filter((x) => x !== t) : [...current, t]
+    setDocTypeOverride(next)
+  }
+
   // ── Recent onboardings (in-memory log) ───────────────────────────────
   const [recent, setRecent] = useState<Array<OnboardSmeResponse & { name: string; ts: string }>>([])
 
@@ -131,6 +155,8 @@ export default function OnboardingPage() {
       mock_tenant_id: selectedTenant.id,
       country_code: cfg.country,
       timezone: cfg.tz,
+      generate_documents: generateDocuments,
+      document_types: generateDocuments ? effectiveDocTypes : null,
     })
     setForm({
       ...form,
@@ -158,6 +184,8 @@ export default function OnboardingPage() {
           mock_tenant_id: selectedTenant.id,
           country_code: cfg.country,
           timezone: cfg.tz,
+          generate_documents: generateDocuments,
+          document_types: generateDocuments ? effectiveDocTypes : null,
         })
       } catch {
         // Mutation already records its own error toast via onboard.error
@@ -347,9 +375,58 @@ export default function OnboardingPage() {
             </div>
           )}
 
-          {/* File upload placeholder — Phase G */}
-          <div className="text-xs text-slate-500 italic border-dashed border border-slate-700 rounded-lg px-3 py-2">
-            📄 Document upload (CNIC, bank statement) — coming in Phase G. Backend doesn't accept files yet.
+          {/* Phase I — synthetic document generator */}
+          <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+            <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={generateDocuments}
+                onChange={(e) => setGenerateDocuments(e.target.checked)}
+                className="rounded"
+              />
+              <span className="font-medium text-slate-200">Generate dummy KYC documents</span>
+              <span className="text-slate-500">
+                — CNIC / Emirates-ID, NTN, bank statement, business reg, utility bill
+              </span>
+            </label>
+            {generateDocuments && (
+              <div className="pl-6 pt-1 flex flex-wrap gap-1.5">
+                {docTypesForRegion(form.region).concat(
+                  // Show any type the user added that's not regional-default
+                  (docTypeOverride ?? []).filter((t) => !docTypesForRegion(form.region).includes(t)),
+                ).map((t) => {
+                  const active = effectiveDocTypes.includes(t)
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => toggleDocType(t)}
+                      className={`text-[11px] px-2 py-0.5 rounded-md border ${
+                        active
+                          ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-200'
+                          : 'bg-slate-800 border-slate-700 text-slate-500 line-through'
+                      }`}
+                      title={active ? 'Click to exclude' : 'Click to include'}
+                    >
+                      {t}
+                    </button>
+                  )
+                })}
+                {docTypeOverride && (
+                  <button
+                    type="button"
+                    onClick={() => setDocTypeOverride(null)}
+                    className="text-[11px] px-2 py-0.5 rounded-md border bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200"
+                    title="Reset to regional defaults"
+                  >
+                    ↺ reset
+                  </button>
+                )}
+              </div>
+            )}
+            <div className="text-[11px] text-slate-500 italic">
+              Numbers are deterministic on acquirer_merchant_id — re-runs produce the same docs.
+            </div>
           </div>
 
           <button
@@ -422,18 +499,46 @@ export default function OnboardingPage() {
           <h2 className="text-sm font-medium text-slate-100 mb-3">
             Recent onboardings (this session)
           </h2>
-          <div className="space-y-1">
+          <div className="space-y-2">
             {recent.map((r) => (
-              <div
+              <details
                 key={r.acquirer_merchant_id + r.ts}
-                className="flex items-center gap-3 text-xs text-slate-400"
+                className="text-xs text-slate-400 [&[open]_summary_.chev]:rotate-90"
               >
-                <CheckCircle2 size={12} className="text-emerald-400 shrink-0" />
-                <span className="text-slate-300 min-w-[180px] truncate">{r.name}</span>
-                <code className="text-indigo-300">{r.acquirer_merchant_id}</code>
-                <span className="text-slate-500">entity={r.trazmo_entity_id.slice(0, 8)}…</span>
-                <span className="text-slate-500">mocksim={r.mocksim_merchant_id}</span>
-              </div>
+                <summary className="flex items-center gap-3 cursor-pointer list-none">
+                  <span className="chev inline-block transition-transform text-slate-500">▸</span>
+                  <CheckCircle2 size={12} className="text-emerald-400 shrink-0" />
+                  <span className="text-slate-300 min-w-[180px] truncate">{r.name}</span>
+                  <code className="text-indigo-300">{r.acquirer_merchant_id}</code>
+                  <span className="text-slate-500">entity={r.trazmo_entity_id.slice(0, 8)}…</span>
+                  <span className="text-slate-500">mocksim={r.mocksim_merchant_id}</span>
+                  {r.synthetic_documents?.length > 0 && (
+                    <span className="text-amber-300 ml-auto">
+                      📎 {r.synthetic_documents.length} doc(s)
+                    </span>
+                  )}
+                </summary>
+                {r.synthetic_documents?.length > 0 && (
+                  <div className="pl-9 pt-2 grid grid-cols-2 gap-2">
+                    {r.synthetic_documents.map((d) => (
+                      <div
+                        key={d.type + d.number}
+                        className="rounded-md border border-slate-700 bg-slate-900/60 px-2 py-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-indigo-300 font-medium">{d.type}</span>
+                          <span className="text-[10px] text-slate-500">{d.issuer}</span>
+                        </div>
+                        <div className="text-slate-300 font-mono">{d.number}</div>
+                        <div className="text-[10px] text-slate-500">
+                          issued {d.issued_at}
+                          {d.expires_at && ` · exp ${d.expires_at}`}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </details>
             ))}
           </div>
         </div>

@@ -378,6 +378,10 @@ class Merchant(Base, TenantScoped):
     risk_tier: Mapped[str] = mapped_column(String(10), nullable=False, default="standard")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     scenario_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase I: synthetic KYC documents (CNIC, NTN, bank statement…) generated
+    # at onboarding time when the operator ticks "Generate documents". Shape:
+    # [{type: "CNIC", number: "42101-1234567-8", issued_at: "...", file_uri: "..."}].
+    synthetic_documents: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

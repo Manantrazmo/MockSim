@@ -168,9 +168,10 @@ export interface PaymentListResponse {
 }
 
 // ─── App Settings ─────────────────────────────────────────────────────────────
+// Phase G note: adminToken/tenantApiKey were removed when auth moved to
+// session cookies + act-as-tenant. Only the API base override survives
+// as user-controlled state; everything else lives in the auth context.
 
 export interface AppSettings {
-  adminToken: string
-  tenantApiKey: string
   apiBase: string
 }

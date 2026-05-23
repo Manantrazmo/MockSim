@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Clock, FastForward, Calendar } from 'lucide-react'
 import { api } from '../api'
+import { useAuth } from '../auth'
 
 function formatSimTime(iso: string): string {
   try {
@@ -23,13 +24,16 @@ function formatSimTime(iso: string): string {
 
 export default function ClockWidget() {
   const qc = useQueryClient()
-  const adminToken = localStorage.getItem('adminToken')
+  // Phase G: auth comes from the session cookie, not a localStorage
+  // token paste. Gate the polling query on whether we're actually
+  // logged in (otherwise the widget hammers /clock with 401s).
+  const { user } = useAuth()
 
   const { data, isError, error } = useQuery({
     queryKey: ['clock'],
     queryFn: () => api.clock(),
     refetchInterval: 5_000,
-    enabled: !!adminToken,
+    enabled: !!user,
   })
 
   const [days, setDays] = useState(0)
@@ -90,9 +94,9 @@ export default function ClockWidget() {
         </h2>
       </div>
 
-      {!adminToken && (
+      {!user && (
         <div className="mb-3 text-xs text-yellow-400 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
-          Admin token not configured — go to Settings.
+          Not signed in.
         </div>
       )}
 

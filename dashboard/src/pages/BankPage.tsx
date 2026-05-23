@@ -36,7 +36,8 @@ function truncate(s: string, len = 16): string {
 }
 
 export default function BankPage() {
-  const tenantKey = localStorage.getItem('tenantApiKey')
+  // Phase G: tenant identity comes from the top-bar "Acting as" picker.
+  const tenantKey = typeof window !== 'undefined' ? localStorage.getItem('mocksim:actAsTenantId') : null
 
   const accountsQuery = useQuery({
     queryKey: ['accounts'],
@@ -58,7 +59,7 @@ export default function BankPage() {
         <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl px-5 py-4 text-yellow-400">
           <KeyRound size={16} />
           <span className="text-sm">
-            Configure your tenant API key in Settings to view bank data.
+            Pick a tenant from the "Acting as" selector in the top bar to view bank data.
           </span>
         </div>
       </div>

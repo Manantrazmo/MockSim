@@ -1,3 +1,11 @@
+/**
+ * App router — Phase G: gated on session.
+ *
+ * While AuthContext is still resolving /auth/me on first load we render
+ * a brief splash. Once resolved:
+ *   - anonymous → LoginPage (no nav, full-screen)
+ *   - authed    → Layout + nested routes
+ */
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 import Overview from './pages/Overview'
@@ -8,8 +16,24 @@ import ScenariosPage from './pages/ScenariosPage'
 import SettingsPage from './pages/SettingsPage'
 import PlaygroundPage from './pages/PlaygroundPage'
 import OnboardingPage from './pages/OnboardingPage'
+import LoginPage from './pages/LoginPage'
+import { useAuth } from './auth'
 
 export default function App() {
+  const { status } = useAuth()
+
+  if (status === 'loading') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 text-slate-400 text-sm">
+        Loading…
+      </div>
+    )
+  }
+
+  if (status === 'anonymous') {
+    return <LoginPage />
+  }
+
   return (
     <Routes>
       <Route element={<Layout />}>

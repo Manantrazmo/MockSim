@@ -25,11 +25,15 @@ from mocksim.persistence.models import ApiKey
 # Paths that don't require authentication
 _PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc"}
 
-# Path prefixes that serve static files — no auth required
-_PUBLIC_PREFIXES = ("/ui",)
+# Path prefixes that serve static files / login-without-auth endpoints
+_PUBLIC_PREFIXES = ("/ui", "/api/v1/auth/login", "/api/v1/auth/logout")
 
-# Prefix for admin-token-protected routes
+# Prefix for admin-protected routes (session OR bearer admin token)
 _ADMIN_PREFIX = "/api/v1/admin"
+
+# /auth/me reads session; it's its own special case — auth required but
+# accepts only session, not bearer (operators only).
+_AUTH_ME_PATH = "/api/v1/auth/me"
 
 
 def _hash_key(raw_key: str) -> str:
@@ -50,14 +54,84 @@ class TenancyMiddleware(BaseHTTPMiddleware):
         if request.url.path in _PUBLIC_PATHS:
             return await call_next(request)
 
-        # Static dashboard files — no auth required
+        # Static dashboard files + login/logout — no auth required
         if request.url.path.startswith(_PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # Admin endpoints use a separate token
+        # /auth/me — session-only path. Let it through; the handler
+        # returns 401 itself if no session is present.
+        if request.url.path == _AUTH_ME_PATH:
+            return await call_next(request)
+
+        # Admin endpoints: session OR bearer admin token.
         if request.url.path.startswith(_ADMIN_PREFIX):
             return await self._handle_admin(request, call_next)
 
+        # Tenant endpoints: bearer tenant key (service callers) OR
+        # admin session + X-Act-As-Tenant header (dashboard reads).
+        return await self._handle_tenant(request, call_next)
+
+    async def _handle_admin(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """
+        /admin/* auth. Accepts EITHER an active session (humans via the
+        dashboard) OR Authorization: Bearer <MOCKSIM_ADMIN_TOKEN> (scripts,
+        curl, the seed CLI). Both pass through with no tenant filter.
+        """
+        from mocksim.config import settings
+
+        # Path 1: session-authenticated operator
+        if _has_active_session(request):
+            request.state.mock_tenant_id = None
+            request.state.trazmo_tenant_id = None
+            request.state.admin_session = True
+            return await call_next(request)
+
+        # Path 2: bearer admin token (legacy / service callers)
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if token and token == settings.mocksim_admin_token:
+            request.state.mock_tenant_id = None
+            request.state.trazmo_tenant_id = None
+            request.state.admin_session = False
+            return await call_next(request)
+
+        return _auth_error("Admin authentication required", status_code=401)
+
+    async def _handle_tenant(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """
+        Tenant endpoint auth. Two routes in:
+
+          (a) Authorization: Bearer <tenant-api-key>
+              Standard service-to-service path. Looks up api_keys → tenant.
+
+          (b) Admin session + X-Act-As-Tenant: <tenant_uuid>
+              Dashboard path. The logged-in operator declares which tenant
+              to read as; we trust them since they're an admin.
+        """
+        # Path (b) — admin session with explicit tenant override
+        if _has_active_session(request):
+            act_as = request.headers.get("X-Act-As-Tenant", "").strip()
+            if not act_as:
+                return _auth_error(
+                    "X-Act-As-Tenant header required for tenant endpoints when using session auth",
+                    status_code=400,
+                )
+            try:
+                tenant_uuid = uuid.UUID(act_as)
+            except ValueError:
+                return _auth_error("X-Act-As-Tenant must be a UUID", status_code=400)
+
+            # Admins get full scope set.
+            token = current_mock_tenant_id.set(tenant_uuid)
+            request.state.mock_tenant_id = tenant_uuid
+            request.state.scopes = ["admin.*"]
+            request.state.trazmo_tenant_id = request.headers.get("X-Trazmo-Tenant-Id")
+            request.state.admin_session = True
+            try:
+                return await call_next(request)
+            finally:
+                current_mock_tenant_id.reset(token)
+
+        # Path (a) — bearer tenant key
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
             return _auth_error("Missing or malformed Authorization header")
@@ -73,30 +147,26 @@ class TenancyMiddleware(BaseHTTPMiddleware):
 
         tenant_id, scopes = resolved
 
-        # Set contextvar — picked up by SQLAlchemy tenant filter + business logic
         token = current_mock_tenant_id.set(tenant_id)
         request.state.mock_tenant_id = tenant_id
-        request.state.scopes = scopes  # used by require_scope() dependency
+        request.state.scopes = scopes
         request.state.trazmo_tenant_id = request.headers.get("X-Trazmo-Tenant-Id")
+        request.state.admin_session = False
 
         try:
             response = await call_next(request)
         finally:
             current_mock_tenant_id.reset(token)
-
         return response
 
-    async def _handle_admin(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        from mocksim.config import settings
 
-        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-        if token != settings.mocksim_admin_token:
-            return _auth_error("Invalid admin token", status_code=403)
-
-        # Admin context: no tenant filter (can see all tenants)
-        request.state.mock_tenant_id = None
-        request.state.trazmo_tenant_id = None
-        return await call_next(request)
+def _has_active_session(request: Request) -> bool:
+    """True iff Starlette SessionMiddleware has a populated session for us."""
+    try:
+        return bool(request.session.get("user_id"))
+    except (AssertionError, AttributeError):
+        # SessionMiddleware not configured — should never happen in normal runs.
+        return False
 
 
 async def _resolve_tenant(key_hash: str) -> tuple[uuid.UUID, list[str]] | None:

@@ -678,10 +678,11 @@ export default function PlaygroundPage() {
 
   const op = OPERATIONS.find(o => o.id === selectedId) ?? OPERATIONS[0]
 
-  const adminToken = localStorage.getItem('adminToken') ?? ''
-  const tenantKey = localStorage.getItem('tenantApiKey') ?? ''
-  const missingCredential =
-    op.authType === 'admin' ? !adminToken : !tenantKey
+  // Phase G: auth via session cookie + X-Act-As-Tenant. No localStorage token paste.
+  const actAsTenantId = typeof window !== 'undefined' ? (localStorage.getItem('mocksim:actAsTenantId') ?? '') : ''
+  // Admin endpoints just need a session (always present if you got past LoginPage).
+  // Tenant endpoints additionally need a selected tenant.
+  const missingCredential = op.authType === 'tenant' && !actAsTenantId
 
   const handleFieldChange = useCallback((key: string, value: string) => {
     setValues(prev => ({ ...prev, [key]: value }))
@@ -723,17 +724,17 @@ export default function PlaygroundPage() {
       const url = buildUrl(op, values, baseUrl)
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
 
-      if (op.authType === 'admin' && adminToken) {
-        headers['Authorization'] = `Bearer ${adminToken}`
-      } else if (op.authType === 'tenant' && tenantKey) {
-        headers['Authorization'] = `Bearer ${tenantKey}`
+      // Tenant endpoints: forward the picked tenant via X-Act-As-Tenant.
+      // The session cookie handles auth for both admin and tenant paths.
+      if (op.authType === 'tenant' && actAsTenantId) {
+        headers['X-Act-As-Tenant'] = actAsTenantId
       }
 
       if (op.needsIdempotencyKey) {
         headers['Idempotency-Key'] = randomUlid()
       }
 
-      const fetchOptions: RequestInit = { method: op.method, headers }
+      const fetchOptions: RequestInit = { method: op.method, headers, credentials: 'include' }
       if (op.method === 'POST') {
         const body = buildBody(op, values)
         fetchOptions.body = JSON.stringify(body)
@@ -773,11 +774,11 @@ export default function PlaygroundPage() {
   const previewBody = op.method === 'POST' ? buildBody(op, values) : null
   const previewUrl = buildUrl(op, values, getBaseUrl() || '(base-url)')
 
-  // Auth header preview
+  // Auth header preview — session cookie does most of the work; tenant ops add a header.
   const authHeaderPreview =
     op.authType === 'admin'
-      ? `Authorization: Bearer ${adminToken ? '***token***' : '(not set)'}`
-      : `Authorization: Bearer ${tenantKey ? '***api-key***' : '(not set)'}`
+      ? 'Cookie: mocksim_session=***session*** (HTTP-only)'
+      : `X-Act-As-Tenant: ${actAsTenantId || '(not set — pick a tenant in the top bar)'}`
 
   return (
     <div className="flex h-full overflow-hidden">

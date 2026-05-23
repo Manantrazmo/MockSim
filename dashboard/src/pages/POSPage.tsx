@@ -19,10 +19,11 @@ interface GeneratePosResult {
 
 async function generatePos(merchantIds: string[], days: number, backfill: boolean) {
   const base = localStorage.getItem('apiBaseUrl') ?? ''
-  const token = localStorage.getItem('adminToken') ?? ''
+  // Session cookie carries auth — `credentials: 'include'` opts in.
   const res = await fetch(`${base}/api/v1/admin/generate-pos`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ merchant_ids: merchantIds, days, backfill }),
   })
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
@@ -47,7 +48,10 @@ function truncateId(id: string, len = 12): string {
 }
 
 export default function POSPage() {
-  const tenantKey = localStorage.getItem('tenantApiKey')
+  // Phase G: tenant identity comes from the top-bar "Acting as" picker.
+  // api.ts attaches X-Act-As-Tenant from localStorage; we just need a
+  // truthy value to gate the queries on.
+  const tenantKey = typeof window !== 'undefined' ? localStorage.getItem('mocksim:actAsTenantId') : null
   const qc = useQueryClient()
   const [merchantFilter, setMerchantFilter] = useState('')
   const [simDateFilter, setSimDateFilter] = useState('')
@@ -100,7 +104,7 @@ export default function POSPage() {
         <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl px-5 py-4 text-yellow-400">
           <KeyRound size={16} />
           <span className="text-sm">
-            Configure your tenant API key in Settings to view POS data.
+            Pick a tenant from the "Acting as" selector in the top bar to view POS data.
           </span>
         </div>
       </div>

@@ -17,9 +17,10 @@
  */
 import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { UserPlus, KeyRound, RefreshCw, CheckCircle2, AlertCircle, Zap } from 'lucide-react'
+import { UserPlus, RefreshCw, CheckCircle2, AlertCircle, Zap } from 'lucide-react'
 import { api } from '../api'
 import type { OnboardSmeResponse } from '../api'
+import { useAuth } from '../auth'
 
 type Region = 'PK' | 'AE' | 'SA' | 'EG' | 'BH'
 
@@ -42,14 +43,14 @@ const COMMON_MCCS = [
 ]
 
 export default function OnboardingPage() {
-  const adminToken = localStorage.getItem('adminToken')
+  const { user } = useAuth()
   const qc = useQueryClient()
 
   // ── Tenants from MockSim ─────────────────────────────────────────────
   const tenantsQuery = useQuery({
     queryKey: ['mocksim-tenants'],
     queryFn: () => api.listTenants(),
-    enabled: !!adminToken,
+    enabled: !!user,
   })
   const tenants = tenantsQuery.data ?? []
   const tenantsWithPartner = useMemo(
@@ -69,7 +70,7 @@ export default function OnboardingPage() {
   const lendersQuery = useQuery({
     queryKey: ['trazmo-lenders'],
     queryFn: () => api.trazmoLenders(),
-    enabled: !!adminToken,
+    enabled: !!user,
   })
 
   // ── Existing SMEs on trazmo for the chosen tenant's partner ─────────
@@ -165,18 +166,7 @@ export default function OnboardingPage() {
     }
   }
 
-  if (!adminToken) {
-    return (
-      <div className="p-6">
-        <div className="flex items-center gap-3 bg-yellow-500/10 border border-yellow-500/20 rounded-xl px-5 py-4 text-yellow-400">
-          <KeyRound size={16} />
-          <span className="text-sm">
-            Configure your admin token in Settings to onboard SMEs.
-          </span>
-        </div>
-      </div>
-    )
-  }
+  // Auth is handled by App.tsx → LoginPage, so `user` is always present here.
 
   const trazmoOk = lendersQuery.data?.trazmo_configured ?? false
 

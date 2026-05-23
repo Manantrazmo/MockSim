@@ -71,6 +71,15 @@ class Settings(BaseSettings):
     otlp_endpoint: str | None = None
     log_level: str = "INFO"
 
+    # ── Auth (Phase G) ────────────────────────────────────────────
+    # itsdangerous secret for signing session cookies. Don't reuse
+    # the admin token — separate concerns.
+    mocksim_session_secret: str = "dev-session-secret-change-in-prod-min-32-chars"
+    # First-time bootstrap password for the default admin user. Read
+    # only when admin_users is empty on startup. After that, change the
+    # password via the dashboard (Phase H).
+    mocksim_bootstrap_password: str = "admin"
+
     # ── Trazmo cross-system integration ───────────────────────────
     # DSN for trazmo-platform's postgres. The cross-system onboarding
     # endpoint (POST /admin/onboard-sme) writes entity / sme_profile /

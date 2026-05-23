@@ -26,21 +26,25 @@ function u(path: string): string {
   return `${getBaseUrl()}${path}`
 }
 
-// ─── Auth headers ─────────────────────────────────────────────────────────────
+// ─── Auth: session cookie + act-as-tenant header (Phase G) ───────────────────
+// The session cookie is set HTTP-only by /auth/login, so we just include
+// credentials on every request. For tenant endpoints, the dashboard "acts
+// as" a tenant via X-Act-As-Tenant; the operator picks the tenant from
+// the top-bar selector and the choice is persisted in localStorage
+// (mocksim:actAsTenantId — UI state only, not auth material).
+
+const ACT_AS_TENANT_KEY = 'mocksim:actAsTenantId'
+const FETCH_OPTS: RequestInit = { credentials: 'include' }
 
 function getAdminHeaders(): HeadersInit {
-  const token = localStorage.getItem('adminToken') ?? ''
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
+  return { 'Content-Type': 'application/json' }
 }
 
 function getTenantHeaders(): HeadersInit {
-  const key = localStorage.getItem('tenantApiKey') ?? ''
+  const tenantId = localStorage.getItem(ACT_AS_TENANT_KEY) ?? ''
   return {
     'Content-Type': 'application/json',
-    ...(key ? { Authorization: `Bearer ${key}` } : {}),
+    ...(tenantId ? { 'X-Act-As-Tenant': tenantId } : {}),
   }
 }
 
@@ -64,12 +68,12 @@ async function handleResponse<T>(res: Response): Promise<T> {
 // ─── Admin API ────────────────────────────────────────────────────────────────
 
 async function stats(): Promise<SystemStats> {
-  const res = await fetch(u('/api/v1/admin/stats'), { headers: getAdminHeaders() })
+  const res = await fetch(u('/api/v1/admin/stats'), { headers: getAdminHeaders(), credentials: 'include' })
   return handleResponse<SystemStats>(res)
 }
 
 async function clock(): Promise<ClockResponse> {
-  const res = await fetch(u('/api/v1/admin/clock'), { headers: getAdminHeaders() })
+  const res = await fetch(u('/api/v1/admin/clock'), { headers: getAdminHeaders(), credentials: 'include' })
   return handleResponse<ClockResponse>(res)
 }
 
@@ -80,7 +84,7 @@ async function advanceClock(
 ): Promise<AdvanceClockResponse> {
   const res = await fetch(u('/api/v1/admin/clock/advance'), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
     body: JSON.stringify({ days, hours, minutes }),
   })
   return handleResponse<AdvanceClockResponse>(res)
@@ -89,7 +93,7 @@ async function advanceClock(
 async function setClock(target: string): Promise<SetClockResponse> {
   const res = await fetch(u('/api/v1/admin/clock/set'), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
     body: JSON.stringify({ target }),
   })
   return handleResponse<SetClockResponse>(res)
@@ -104,7 +108,7 @@ async function outbox(
   if (limit) params.set('limit', String(limit))
   const query = params.toString() ? `?${params.toString()}` : ''
   const res = await fetch(u(`/api/v1/admin/outbox${query}`), {
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
   })
   return handleResponse<OutboxResponse>(res)
 }
@@ -112,14 +116,14 @@ async function outbox(
 async function replayWebhook(eventId: string): Promise<ReplayResponse> {
   const res = await fetch(u(`/api/v1/admin/webhooks/${eventId}/replay`), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
   })
   return handleResponse<ReplayResponse>(res)
 }
 
 async function scenarioStatus(): Promise<ScenarioStatus> {
   const res = await fetch(u('/api/v1/admin/scenarios/status'), {
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
   })
   return handleResponse<ScenarioStatus>(res)
 }
@@ -127,7 +131,7 @@ async function scenarioStatus(): Promise<ScenarioStatus> {
 async function enableScenarios(): Promise<ScenarioToggleResponse> {
   const res = await fetch(u('/api/v1/admin/scenarios/enable'), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
   })
   return handleResponse<ScenarioToggleResponse>(res)
 }
@@ -135,7 +139,7 @@ async function enableScenarios(): Promise<ScenarioToggleResponse> {
 async function disableScenarios(): Promise<ScenarioToggleResponse> {
   const res = await fetch(u('/api/v1/admin/scenarios/disable'), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
   })
   return handleResponse<ScenarioToggleResponse>(res)
 }
@@ -144,7 +148,7 @@ async function disableScenarios(): Promise<ScenarioToggleResponse> {
 
 async function merchants(): Promise<MerchantResponse[]> {
   const res = await fetch(u('/api/v1/pos/merchants'), {
-    headers: getTenantHeaders(),
+    headers: getTenantHeaders(), credentials: 'include',
   })
   return handleResponse<MerchantResponse[]>(res)
 }
@@ -159,14 +163,14 @@ async function transactions(
   if (params?.cursor) qs.set('cursor', params.cursor)
   const query = qs.toString() ? `?${qs.toString()}` : ''
   const res = await fetch(u(`/api/v1/pos/transactions${query}`), {
-    headers: getTenantHeaders(),
+    headers: getTenantHeaders(), credentials: 'include',
   })
   return handleResponse<TransactionListResponse>(res)
 }
 
 async function accounts(): Promise<AccountResponse[]> {
   const res = await fetch(u('/api/v1/bank/accounts'), {
-    headers: getTenantHeaders(),
+    headers: getTenantHeaders(), credentials: 'include',
   })
   return handleResponse<AccountResponse[]>(res)
 }
@@ -176,7 +180,7 @@ async function payments(limit?: number): Promise<PaymentListResponse> {
   if (limit) qs.set('limit', String(limit))
   const query = qs.toString() ? `?${qs.toString()}` : ''
   const res = await fetch(u(`/api/v1/bank/payments${query}`), {
-    headers: getTenantHeaders(),
+    headers: getTenantHeaders(), credentials: 'include',
   })
   return handleResponse<PaymentListResponse>(res)
 }
@@ -186,7 +190,7 @@ async function payments(limit?: number): Promise<PaymentListResponse> {
 async function ping(): Promise<{ ok: boolean; latencyMs: number }> {
   const start = Date.now()
   try {
-    const res = await fetch(u('/api/v1/admin/stats'), { headers: getAdminHeaders() })
+    const res = await fetch(u('/api/v1/admin/stats'), { headers: getAdminHeaders(), credentials: 'include' })
     return { ok: res.ok, latencyMs: Date.now() - start }
   } catch {
     return { ok: false, latencyMs: Date.now() - start }
@@ -196,7 +200,7 @@ async function ping(): Promise<{ ok: boolean; latencyMs: number }> {
 async function pingTenant(): Promise<{ ok: boolean; latencyMs: number }> {
   const start = Date.now()
   try {
-    const res = await fetch(u('/api/v1/pos/merchants'), { headers: getTenantHeaders() })
+    const res = await fetch(u('/api/v1/pos/merchants'), { headers: getTenantHeaders(), credentials: 'include' })
     return { ok: res.ok, latencyMs: Date.now() - start }
   } catch {
     return { ok: false, latencyMs: Date.now() - start }
@@ -254,26 +258,26 @@ export interface OnboardSmeResponse {
 }
 
 async function listTenants(): Promise<MockTenant[]> {
-  const res = await fetch(u('/api/v1/admin/tenants'), { headers: getAdminHeaders() })
+  const res = await fetch(u('/api/v1/admin/tenants'), { headers: getAdminHeaders(), credentials: 'include' })
   const body = await handleResponse<{ tenants: MockTenant[] }>(res)
   return body.tenants
 }
 
 async function trazmoLenders(): Promise<{ lenders: TrazmoLender[]; trazmo_configured: boolean }> {
-  const res = await fetch(u('/api/v1/admin/trazmo/lenders'), { headers: getAdminHeaders() })
+  const res = await fetch(u('/api/v1/admin/trazmo/lenders'), { headers: getAdminHeaders(), credentials: 'include' })
   return handleResponse(res)
 }
 
 async function trazmoSmes(partnerCode: string): Promise<{ smes: TrazmoSme[]; trazmo_configured: boolean }> {
   const q = new URLSearchParams({ partner_code: partnerCode }).toString()
-  const res = await fetch(u(`/api/v1/admin/trazmo/smes?${q}`), { headers: getAdminHeaders() })
+  const res = await fetch(u(`/api/v1/admin/trazmo/smes?${q}`), { headers: getAdminHeaders(), credentials: 'include' })
   return handleResponse(res)
 }
 
 async function onboardSme(body: OnboardSmeRequest): Promise<OnboardSmeResponse> {
   const res = await fetch(u('/api/v1/admin/onboard-sme'), {
     method: 'POST',
-    headers: getAdminHeaders(),
+    headers: getAdminHeaders(), credentials: 'include',
     body: JSON.stringify(body),
   })
   return handleResponse(res)

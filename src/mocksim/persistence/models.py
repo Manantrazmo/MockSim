@@ -27,6 +27,25 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from mocksim.persistence.database import Base, TenantScoped
 
 
+# ── Admin operator accounts (Phase G — dashboard login) ──────────
+
+class AdminUser(Base):
+    """
+    Human operator credential for the dashboard. Replaces the localStorage-
+    pasted admin token for browser flows; service callers still use the
+    bearer token. Passwords are bcrypt-hashed.
+    """
+    __tablename__ = "admin_users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 # ── Tenants & API keys ────────────────────────────────────────────
 
 class MockTenant(Base):

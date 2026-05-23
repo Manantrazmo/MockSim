@@ -69,6 +69,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Seed scenario engine status if not present
     await _ensure_scenario_engine_status()
 
+    # Bootstrap default admin user if admin_users is empty
+    from mocksim.auth.bootstrap import ensure_default_admin
+    await ensure_default_admin()
+
     # Register SimScheduler job-type handlers (sim-time, not wall-clock)
     from mocksim.pos.generator import register_handlers as register_pos_handlers
     from mocksim.pos.settlement import register_handlers as register_settlement_handlers
@@ -136,15 +140,28 @@ def create_app() -> FastAPI:
         redoc_url="/redoc",
     )
 
-    # Middleware (added in reverse — last added = outermost)
+    # Middleware (added in reverse — last added = outermost).
+    # SessionMiddleware sits OUTSIDE TenancyMiddleware so request.session
+    # is populated before tenancy resolution reads from it.
+    from starlette.middleware.sessions import SessionMiddleware
     app.add_middleware(ScenarioMiddleware)
     app.add_middleware(TenancyMiddleware)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.mocksim_session_secret,
+        session_cookie="mocksim_session",
+        max_age=14 * 24 * 60 * 60,  # 14 days rolling
+        same_site="lax",
+        https_only=False,  # local dev runs on plain HTTP
+    )
 
     # Routers
     from mocksim.pos.api import router as pos_router
     from mocksim.bank.api import router as bank_router
     from mocksim.admin.api import router as admin_router
+    from mocksim.auth.api import router as auth_router
 
+    app.include_router(auth_router, prefix="/api/v1")
     app.include_router(pos_router, prefix="/api/v1")
     app.include_router(bank_router, prefix="/api/v1")
     app.include_router(admin_router, prefix="/api/v1")

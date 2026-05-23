@@ -415,6 +415,23 @@ docker compose exec mocksim python scripts/smoke_e2e.py --advance-days 1
 Each session appends one bullet here with the session date + the headline.
 Detail goes in the section above it grows. Keep this terse.
 
+- **2026-05-23 (session 3 — Phase G)** — Proper session auth. Replaced
+  the "paste admin token + tenant API key into localStorage" UX with a
+  username + password login that returns an HTTP-only signed cookie
+  (Starlette SessionMiddleware + bcrypt + itsdangerous). New
+  `admin_users` table (migration 0004), bootstrap creates default
+  `admin`/`admin` on first start (configurable via
+  `MOCKSIM_BOOTSTRAP_PASSWORD`). New endpoints `POST /auth/login`,
+  `POST /auth/logout`, `GET /auth/me`. TenancyMiddleware accepts EITHER
+  session cookie (humans, dashboard) OR bearer token (service callers,
+  scripts, trazmo's adapter) — backward-compat preserved. For tenant
+  endpoints, admins act-as via top-bar tenant picker → `X-Act-As-Tenant`
+  header. Settings page rewritten to surface account info + live
+  connectivity probes instead of token paste fields. End-to-end
+  verified: login OK, session cookie set, `/admin/stats` works without
+  bearer, `/pos/merchants` works via session+act-as header, bearer
+  fallback still works for scripts. 112/112 tests pass.
+
 - **2026-05-23 (session 2 — Phase F)** — Cross-system SME onboarding.
   New `mocksim.trazmo` backend module talks directly to trazmo's
   postgres. Three new admin endpoints: `GET /admin/tenants`,

@@ -259,6 +259,11 @@ export interface OnboardSmeRequest {
   timezone?: string
   generate_documents?: boolean
   document_types?: string[] | null
+  // Phase J: marketplace visibility.
+  // 'private' = lender push; lender_entity_id REQUIRED.
+  // 'public'  = marketplace listing; not yet wired server-side.
+  visibility?: 'private' | 'public'
+  lender_entity_id?: string | null
 }
 
 export interface OnboardSmeResponse {

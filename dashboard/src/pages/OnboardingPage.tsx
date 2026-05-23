@@ -101,6 +101,19 @@ export default function OnboardingPage() {
   const [bulkCount, setBulkCount] = useState(5)
   const [bulkPrefix, setBulkPrefix] = useState('Acme')
 
+  // ── Phase J: marketplace visibility ─────────────────────────────────
+  // Private (default): pick a lender from the dropdown; the SME lands in
+  // that lender's pipeline immediately and Approve works.
+  // Public: marketplace listing (not yet wired — server returns 501).
+  const [visibility, setVisibility] = useState<'private' | 'public'>('private')
+  const [lenderEntityId, setLenderEntityId] = useState<string>('')
+  const lenders = lendersQuery.data?.lenders ?? []
+  // Pre-pick the first lender once the list loads so single-mode submit
+  // doesn't fail just because the operator forgot to open the dropdown.
+  if (lenders.length > 0 && !lenderEntityId && visibility === 'private') {
+    setLenderEntityId(lenders[0].id)
+  }
+
   // ── Synthetic documents (Phase I) ───────────────────────────────────
   // Region-aware default set; the operator can override to any subset.
   // We don't hard-code the full type list here — `null` means "let the
@@ -157,6 +170,8 @@ export default function OnboardingPage() {
       timezone: cfg.tz,
       generate_documents: generateDocuments,
       document_types: generateDocuments ? effectiveDocTypes : null,
+      visibility,
+      lender_entity_id: visibility === 'private' ? lenderEntityId || null : null,
     })
     setForm({
       ...form,
@@ -374,6 +389,59 @@ export default function OnboardingPage() {
               </Field>
             </div>
           )}
+
+          {/* Phase J — marketplace visibility */}
+          <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs text-slate-300">
+              <span className="font-medium text-slate-200">Visibility</span>
+              <div className="flex bg-slate-800 rounded-md p-0.5 border border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setVisibility('private')}
+                  className={`px-2.5 py-0.5 rounded text-[11px] ${
+                    visibility === 'private'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  Private
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVisibility('public')}
+                  className={`px-2.5 py-0.5 rounded text-[11px] ${
+                    visibility === 'public'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                  title="Marketplace listing — not yet wired (server returns 501)"
+                >
+                  Public
+                </button>
+              </div>
+              <span className="text-slate-500 text-[11px] ml-auto">
+                {visibility === 'private'
+                  ? 'Lender-bound; Approve works immediately'
+                  : '🚧 marketplace — server returns 501 until claim flow ships'}
+              </span>
+            </div>
+            {visibility === 'private' && (
+              <Field label="Lender (required)">
+                <select
+                  value={lenderEntityId}
+                  onChange={(e) => setLenderEntityId(e.target.value)}
+                  className="input"
+                >
+                  {lenders.length === 0 && <option value="">(loading lenders…)</option>}
+                  {lenders.map((l) => (
+                    <option key={l.id} value={l.id}>
+                      {l.legal_name} · {l.code}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+          </div>
 
           {/* Phase I — synthetic document generator */}
           <div className="rounded-lg border border-slate-700 bg-slate-900/40 p-3 space-y-2">

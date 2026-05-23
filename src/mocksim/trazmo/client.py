@@ -216,11 +216,16 @@ async def onboard_sme(
     timezone: str = "Asia/Karachi",
     acquirer_merchant_id: str | None = None,
     terminal_ids: list[str] | None = None,
+    visibility: str = "private",
+    lender_entity_id: str | None = None,
 ) -> OnboardedSme:
     """
     Single-call cross-system onboarding. Trazmo creates entity +
     sme_profile + merchant_profile + acquirer_mapping atomically and
     emits the relevant audit event. We just unbox the IDs.
+
+    Phase J adds visibility + lender_entity_id. Private mode requires
+    an explicit lender; public is reserved (server 501s).
     """
     client = _client_from_settings()
     body = {
@@ -233,6 +238,8 @@ async def onboard_sme(
         "timezone": timezone,
         "acquirer_merchant_id": acquirer_merchant_id,
         "terminal_ids": terminal_ids,
+        "visibility": visibility,
+        "lender_entity_id": lender_entity_id,
     }
     data = await client._post("/api/v1/_internal/mocksim/onboard-merchant", body)
     log.info(

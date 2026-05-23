@@ -442,6 +442,13 @@ class OnboardSmeRequest(BaseModel):
     # Country/timezone — defaults match trazmo's PK seed.
     country_code: str = Field("PK", min_length=2, max_length=2)
     timezone: str = Field("Asia/Karachi", max_length=64)
+    # ── Phase J: marketplace visibility ──────────────────────────────
+    # "private" — lender/partner push. lender_entity_id REQUIRED.
+    # "public"  — marketplace listing; deferred (trazmo returns 501).
+    visibility: str = Field(default="private", pattern="^(private|public)$")
+    # Required when visibility=='private'. Pick from
+    # GET /api/v1/admin/trazmo/lenders (drives the dropdown in the UI).
+    lender_entity_id: str | None = Field(default=None)
     # Phase I: synthetic KYC document generation. When True, the
     # onboard endpoint generates region-appropriate fake-but-plausible
     # documents (CNIC/Emirates-ID/etc., NTN, bank statement, business
@@ -511,6 +518,9 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
 
     # 3. One HTTP call to trazmo — server runs the four inserts in one
     # transaction and emits the audit event. No more direct PG writes.
+    # Phase J: trazmo refuses private without an explicit lender, and
+    # 501s on public for now. Pass visibility + lender_entity_id through
+    # so the operator's choice in the UI lands on the right row.
     try:
         onboarded = await trazmo_client.onboard_sme(
             partner_code=tenant.partner_code,
@@ -521,6 +531,8 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
             country_code=body.country_code,
             timezone=body.timezone,
             acquirer_merchant_id=body.acquirer_merchant_id,
+            visibility=body.visibility,
+            lender_entity_id=body.lender_entity_id,
         )
         acquirer_id = onboarded.acquirer_merchant_id
     except trazmo_client.TrazmoNotBootstrapped as exc:
@@ -528,7 +540,10 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
         raise MockSimError(409, ErrorCode.INTERNAL_ERROR, str(exc))
     except trazmo_client.TrazmoServiceError as exc:
         from mocksim.core.errors import MockSimError, ErrorCode
-        raise MockSimError(502, ErrorCode.INTERNAL_ERROR, str(exc))
+        # Pass through trazmo's status so 400 (validation) stays 400 and
+        # 501 (public deferred) stays 501 — the UI maps those cases.
+        status = exc.status if 400 <= exc.status < 600 else 502
+        raise MockSimError(status, ErrorCode.INTERNAL_ERROR, str(exc))
 
     # 4. Create / reuse the MockSim merchant row with matching IDs.
     region_cfg = get_region(body.region)

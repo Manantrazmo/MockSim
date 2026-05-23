@@ -612,10 +612,12 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
 
 
 @router.get("/trazmo/lenders")
-async def trazmo_lenders() -> dict[str, Any]:
+async def trazmo_lenders(response: Response) -> dict[str, Any]:
     """List trazmo's lender entities via the authenticated service API."""
     from mocksim.config import settings as cfg
     from mocksim.trazmo import client as trazmo_client
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Vary"] = "Cookie"
     if not (cfg.trazmo_api_url and cfg.trazmo_service_token):
         return {"lenders": [], "trazmo_configured": False}
     try:
@@ -704,10 +706,20 @@ async def generate_pos_for_merchants(body: GeneratePosRequest) -> dict[str, Any]
 
 
 @router.get("/trazmo/smes")
-async def trazmo_smes(partner_code: str) -> dict[str, Any]:
-    """List trazmo's SME entities for one partner via the service API."""
+async def trazmo_smes(partner_code: str, response: Response) -> dict[str, Any]:
+    """
+    List trazmo's SME entities for one partner via the service API.
+
+    Cache-Control: no-store — the onboarding panel polls every 10s and
+    operators expect new SMEs to appear immediately. Any HTTP cache
+    in between (browser, dev-tools "Disable cache" off, reverse proxy)
+    would show stale counts. The Vary header keeps proxies honest if
+    they ever cache.
+    """
     from mocksim.config import settings as cfg
     from mocksim.trazmo import client as trazmo_client
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Vary"] = "Cookie"
     if not (cfg.trazmo_api_url and cfg.trazmo_service_token):
         return {"smes": [], "trazmo_configured": False}
     try:

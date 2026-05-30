@@ -101,6 +101,37 @@ export default function OnboardingPage() {
   const [bulkCount, setBulkCount] = useState(5)
   const [bulkPrefix, setBulkPrefix] = useState('Acme')
 
+  // ── Channel override ─────────────────────────────────────────────────
+  // Defaults to the MockSim tenant's configured partner_code (today
+  // MOCK_POS_1, which falls under the DIRECT channel on the trazmo
+  // side). Operator can pick a specific anchor channel so the new SME
+  // gets attributed there — drives which risk-workflow scan picks it up
+  // (DARAZ workflow scans DARAZ_PK partner mappings only, etc.).
+  // Empty string = "use tenant default"; concrete partner_codes are
+  // sent through to /admin/onboard-sme as the partner_code override.
+  const CHANNEL_OPTIONS = [
+    // Default lifted to DARAZ_PK because that's the only risk workflow
+    // wired today — picking 'Default (tenant partner)' silently mapped
+    // new SMEs to MOCK_POS_1 which no live workflow scans.
+    { value: 'DARAZ_PK',    label: 'DARAZ — Daraz Pakistan (marketplace) — DEFAULT' },
+    { value: 'TCS_PK',      label: 'TCS — TCS Courier Pakistan (logistics)' },
+    { value: 'JAZZCASH_PK', label: 'JAZZCASH — JazzCash agents (mobile money)' },
+    { value: 'MOCK_POS_1',  label: 'DIRECT — Mock POS Acquirer (walk-in)' },
+    { value: '',            label: '(tenant default — usually MOCK_POS_1)' },
+  ]
+  const [channelOverride, setChannelOverride] = useState<string>('DARAZ_PK')
+
+  // City picker — primary business city. ISO-uppercase tokens match the
+  // workflow GEOGRAPHY rule values on trazmo. Empty string = "no city",
+  // which means the SME will fail any geography-gated workflow until an
+  // operator adds an address later.
+  const PK_CITIES = [
+    'KARACHI', 'LAHORE', 'ISLAMABAD', 'RAWALPINDI',
+    'FAISALABAD', 'MULTAN', 'PESHAWAR', 'QUETTA',
+    'HYDERABAD', 'SIALKOT', 'GUJRANWALA',
+  ]
+  const [city, setCity] = useState<string>('KARACHI')
+
   // ── Phase J: marketplace visibility ─────────────────────────────────
   // Private (default): pick a lender from the dropdown; the SME lands in
   // that lender's pipeline immediately and Approve works.
@@ -172,6 +203,9 @@ export default function OnboardingPage() {
       document_types: generateDocuments ? effectiveDocTypes : null,
       visibility,
       lender_entity_id: visibility === 'private' ? lenderEntityId || null : null,
+      // Empty string = "use tenant default" — server uses tenant.partner_code.
+      partner_code: channelOverride || undefined,
+      city: city || undefined,
     })
     setForm({
       ...form,
@@ -201,6 +235,12 @@ export default function OnboardingPage() {
           timezone: cfg.tz,
           generate_documents: generateDocuments,
           document_types: generateDocuments ? effectiveDocTypes : null,
+          visibility,
+          lender_entity_id: visibility === 'private' ? lenderEntityId || null : null,
+          partner_code: channelOverride || undefined,
+          // For bulk mode, rotate the city across the list so the demo
+          // produces a geography mix rather than 25 KARACHI SMEs.
+          city: PK_CITIES[(i - 1) % PK_CITIES.length],
         })
       } catch {
         // Mutation already records its own error toast via onboard.error
@@ -441,6 +481,38 @@ export default function OnboardingPage() {
                 </select>
               </Field>
             )}
+            {/* Channel override — picks which trazmo partner_code is used
+                for this SME's acquirer mapping. That partner_code is what
+                each risk_workflow.channel filter matches against, so the
+                choice here determines which workflow's scan picks up the
+                SME (DARAZ → Daraz workflow, DIRECT → Direct Borrower
+                workflow, etc.). */}
+            <Field label="Channel (origination source)">
+              <select
+                value={channelOverride}
+                onChange={(e) => setChannelOverride(e.target.value)}
+                className="input"
+              >
+                {CHANNEL_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </Field>
+            {/* City — feeds an address row on trazmo + Daraz/DIRECT
+                GEOGRAPHY eligibility rule. Bulk mode rotates across
+                PK_CITIES so the demo gets a geography mix. */}
+            <Field label="Primary business city">
+              <select
+                value={city}
+                onChange={(e) => setCity(e.target.value)}
+                className="input"
+              >
+                <option value="">(no city)</option>
+                {PK_CITIES.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </Field>
           </div>
 
           {/* Phase I — synthetic document generator */}

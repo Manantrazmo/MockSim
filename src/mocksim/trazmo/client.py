@@ -218,6 +218,8 @@ async def onboard_sme(
     terminal_ids: list[str] | None = None,
     visibility: str = "private",
     lender_entity_id: str | None = None,
+    city: str | None = None,
+    synthetic_documents: list[dict] | None = None,
 ) -> OnboardedSme:
     """
     Single-call cross-system onboarding. Trazmo creates entity +
@@ -226,6 +228,12 @@ async def onboard_sme(
 
     Phase J adds visibility + lender_entity_id. Private mode requires
     an explicit lender; public is reserved (server 501s).
+
+    `city` and `synthetic_documents` are forwarded so trazmo can write
+    an address row + populate applicant_submission.documents_json,
+    which feeds the Flux Onboarding Management lead detail page.
+    Without these, operators couldn't see where the SME is located OR
+    which KYC docs were generated for it.
     """
     client = _client_from_settings()
     body = {
@@ -240,6 +248,8 @@ async def onboard_sme(
         "terminal_ids": terminal_ids,
         "visibility": visibility,
         "lender_entity_id": lender_entity_id,
+        "city": city,
+        "synthetic_documents": synthetic_documents or [],
     }
     data = await client._post("/api/v1/_internal/mocksim/onboard-merchant", body)
     log.info(

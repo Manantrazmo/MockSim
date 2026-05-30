@@ -457,6 +457,14 @@ class OnboardSmeRequest(BaseModel):
     # defaults for the region".
     generate_documents: bool = False
     document_types: list[str] | None = Field(default=None)
+    # Channel override.
+    partner_code: str | None = Field(default=None, max_length=64)
+    # City of the SME's primary business location. Forwarded to trazmo
+    # so an `address` row gets written; consumed by Flux's Business
+    # Metrics list + Daraz/etc. workflow GEOGRAPHY eligibility rule.
+    # Free-form string; the form sends ISO-uppercase tokens
+    # (KARACHI / LAHORE / ...) so they match the workflow rule values.
+    city: str | None = Field(default=None, max_length=100)
 
 
 class OnboardSmeResponse(BaseModel):
@@ -499,18 +507,29 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
 
     tenant_id = uuid.UUID(body.mock_tenant_id)
 
-    # 1. Look up MockSim tenant + partner_code.
+    # 1. Look up MockSim tenant + partner_code (override beats default).
+    # Body-level partner_code lets the UI pick which channel the SME
+    # gets attributed to (DARAZ_PK / TCS_PK / etc.); without one we
+    # fall back to the MockSim tenant's configured default.
     async with async_session_factory() as session:
         t = await session.execute(
             select(MockTenant).where(MockTenant.id == tenant_id)
         )
         tenant = t.scalar_one_or_none()
-        if tenant is None or not tenant.partner_code:
+        if tenant is None:
             from mocksim.core.errors import MockSimError, ErrorCode
             raise MockSimError(
                 400, ErrorCode.INTERNAL_ERROR,
-                f"MockSim tenant {tenant_id} has no partner_code — required for onboarding",
+                f"MockSim tenant {tenant_id} not found",
             )
+    effective_partner_code = (body.partner_code or "").strip() or tenant.partner_code
+    if not effective_partner_code:
+        from mocksim.core.errors import MockSimError, ErrorCode
+        raise MockSimError(
+            400, ErrorCode.INTERNAL_ERROR,
+            "No partner_code resolved: neither the request body nor the "
+            "MockSim tenant carries one.",
+        )
 
     # 2. Pre-compute the stable SME code from the legal_name slug.
     slug = "".join(c if c.isalnum() else "_" for c in body.legal_name.upper())[:24].strip("_")
@@ -518,12 +537,26 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
 
     # 3. One HTTP call to trazmo — server runs the four inserts in one
     # transaction and emits the audit event. No more direct PG writes.
+    # Pre-generate synthetic KYC documents so we can pass them to trazmo
+    # in the SAME onboarding call. Storage on the MockSim merchant row
+    # still happens below; this just hoists the generation up so trazmo
+    # can stamp them onto applicant_submission.documents_json — without
+    # which Flux's Onboarding Management lead detail page shows nothing.
+    # Seed by sme_code (stable across the legal_name → slug derivation
+    # on this same request) so re-runs are reproducible.
+    pre_synthetic_docs: list[dict[str, Any]] = []
+    if body.generate_documents:
+        from mocksim.synth.documents import generate_documents as _gen_docs
+        pre_synthetic_docs = _gen_docs(
+            region=body.region, seed=sme_code, types=body.document_types,
+        )
+
     # Phase J: trazmo refuses private without an explicit lender, and
     # 501s on public for now. Pass visibility + lender_entity_id through
     # so the operator's choice in the UI lands on the right row.
     try:
         onboarded = await trazmo_client.onboard_sme(
-            partner_code=tenant.partner_code,
+            partner_code=effective_partner_code,
             sme_code=sme_code,
             legal_name=body.legal_name,
             owner_name=body.owner_name,
@@ -533,6 +566,8 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
             acquirer_merchant_id=body.acquirer_merchant_id,
             visibility=body.visibility,
             lender_entity_id=body.lender_entity_id,
+            city=(body.city or "").strip().upper() or None,
+            synthetic_documents=pre_synthetic_docs,
         )
         acquirer_id = onboarded.acquirer_merchant_id
     except trazmo_client.TrazmoNotBootstrapped as exc:
@@ -559,23 +594,18 @@ async def onboard_sme(body: OnboardSmeRequest) -> OnboardSmeResponse:
             )
         )
         merchant = existing.scalar_one_or_none()
-        # Phase I — generate synthetic KYC documents on demand. Stable on
-        # acquirer_merchant_id so re-running the bulk onboard yields the
-        # same CNIC/NTN/etc. numbers, which keeps subsequent demo
-        # screenshots reproducible.
-        synthetic_docs: list[dict[str, Any]] = []
-        if body.generate_documents:
-            from mocksim.synth.documents import generate_documents as _gen_docs
-            synthetic_docs = _gen_docs(
-                region=body.region,
-                seed=acquirer_id,
-                types=body.document_types,
-            )
+        # Reuse the docs we already generated + sent to trazmo. (We used
+        # sme_code as the seed up there; the older code used acquirer_id
+        # but acquirer_id only exists post-onboarding, so we hoisted
+        # generation to before the trazmo call to get them threaded
+        # through into applicant_submission.documents_json.)
+        synthetic_docs: list[dict[str, Any]] = pre_synthetic_docs
+        if synthetic_docs:
             log.info(
                 "admin.sme_onboarded.documents",
                 acquirer_merchant_id=acquirer_id,
                 doc_count=len(synthetic_docs),
-                types=[d["type"] for d in synthetic_docs],
+                types=[d.get("type") for d in synthetic_docs],
             )
 
         if merchant is None:

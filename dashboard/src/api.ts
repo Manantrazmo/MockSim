@@ -264,6 +264,15 @@ export interface OnboardSmeRequest {
   // 'public'  = marketplace listing; not yet wired server-side.
   visibility?: 'private' | 'public'
   lender_entity_id?: string | null
+  // Optional channel override — concrete trazmo partner_code
+  // (DARAZ_PK / TCS_PK / JAZZCASH_PK / MOCK_POS_1). When unset, server
+  // falls back to the MockSim tenant's default partner_code.
+  partner_code?: string
+  // Primary business city. Persisted on trazmo as an address row;
+  // feeds Flux's Business Metrics City column + the Daraz / DIRECT
+  // workflow GEOGRAPHY eligibility rule. ISO-uppercase tokens
+  // (KARACHI, LAHORE, ...) match the workflow rule values.
+  city?: string
 }
 
 export interface OnboardSmeResponse {
